@@ -1,0 +1,22 @@
+interface host {
+    gen-random-integer: func() -> u32
+}
+
+
+default world chat-plugin {
+    import host: self.host
+
+
+
+    record chat-instruction {
+        msg: string,
+        temp: float32,
+        context: bool,
+        save: bool,
+        pastebin: bool
+    }
+
+    export get-chat-instruction: func(line: string) -> option<chat-instruction>
+
+    // export run: func(name: string) -> string
+}
