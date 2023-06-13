@@ -12,7 +12,8 @@ pub async fn upload_text(data: &str) -> anyhow::Result<String> {
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(data.to_string())
         .send()
-        .await.context("Failed to upload text")?;
+        .await
+        .context("Failed to upload text")?;
 
     let url = upload_resp.text().await?;
     if url.starts_with("https://") {
@@ -21,3 +22,8 @@ pub async fn upload_text(data: &str) -> anyhow::Result<String> {
     anyhow::bail!("Unexpected error uploading")
 }
 
+#[tokio::test]
+async fn test_upload() {
+    let data = "hello world";
+    upload_text(data).await.unwrap();
+}

@@ -20,6 +20,9 @@ const BOTS_TO_IGNORE: &[&str] = &["EmceeOverviewer", "box-bot", "GizmoBot"];
 mod openai;
 mod secrets;
 
+/// An atomic F32
+/// 
+/// This is a wrapper around an AtomicU32 that stores the f32 bits as a u32.
 pub struct AtomicF32 {
     storage: AtomicU32,
 }
@@ -347,7 +350,10 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 if msg.starts_with("!get_temp") {
-                    sender.send_privmsg(resp_target, format!("Current global temp is {}", TEMPERATURE.load()))?;
+                    sender.send_privmsg(
+                        resp_target,
+                        format!("Current global temp is {}", TEMPERATURE.load()),
+                    )?;
                     continue;
                 }
                 if let Some(inst) = get_chat_instruction(msg) {
@@ -472,7 +478,11 @@ fn split_long_message_for_irc(msg: &str) -> Vec<String> {
     msg.lines()
         .filter(|l| !l.trim().is_empty())
         .flat_map(|l| textwrap::wrap(l, 400))
-        .map(|c| c.into_owned())
+        .map(|c| {
+            c.chars()
+                .filter(|c| !c.is_ascii_control() || c.is_ascii_whitespace())
+                .collect()
+        })
         .collect()
 }
 

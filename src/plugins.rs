@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use wasmtime::{Config, Engine, component::{Component, Linker}, Store};
+use wasmtime::{
+    component::{Component, Linker},
+    Config, Engine, Store,
+};
 
 wasmtime::component::bindgen!({
     world: "foo",
@@ -15,7 +18,6 @@ impl host::Host for HostImports {
     }
 }
 
-
 #[tokio::test]
 async fn test() -> anyhow::Result<()> {
     let mut config = Config::new();
@@ -27,19 +29,15 @@ async fn test() -> anyhow::Result<()> {
     let mut linker = Linker::new(&engine);
     ChatPlugin::add_to_linker(&mut linker, |state: &mut HostImports| state)?;
 
-    let mut store = Store::new(
-        &engine,
-        HostImports,
-    );
+    let mut store = Store::new(&engine, HostImports);
 
     let (bindings, _) = ChatPlugin::instantiate_async(&mut store, &component, &linker).await?;
 
-    
-    let x = bindings.call_get_chat_instruction(&mut store, "!chat:temp=0.4,save=no,pastebin").await;
-    
+    let x = bindings
+        .call_get_chat_instruction(&mut store, "!chat:temp=0.4,save=no,pastebin hello there")
+        .await;
+
     dbg!(x);
-    
 
     Ok(())
-
 }

@@ -93,9 +93,9 @@ pub async fn get_chat(messages: Vec<ChatMessage>, temp: f32) -> anyhow::Result<C
     };
 
     let client = reqwest::Client::builder()
-    .connect_timeout(Duration::from_secs(30))
-    .timeout(Duration::from_secs(60))
-    .build()?;
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .build()?;
     let req = client
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(crate::secrets::OPENAPI_KEY)
@@ -134,9 +134,9 @@ pub async fn get_image(prompt: &str) -> anyhow::Result<String> {
     };
 
     let client = reqwest::Client::builder()
-    .connect_timeout(Duration::from_secs(30))
-    .timeout(Duration::from_secs(60))
-    .build()?;
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .build()?;
     let req = client
         .post("https://api.openai.com/v1/images/generations")
         .bearer_auth(crate::secrets::OPENAPI_KEY)
