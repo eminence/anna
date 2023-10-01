@@ -1,6 +1,8 @@
 use anyhow::Context;
 
-pub mod plugins;
+// pub mod plugins;
+
+pub mod wttr;
 
 pub async fn upload_text(data: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder().build()?;
