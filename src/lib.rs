@@ -4,15 +4,16 @@ use anyhow::Context;
 
 pub mod wttr;
 
-pub async fn upload_text(data: &str) -> anyhow::Result<String> {
+/// Upload some content to up.em32.site and return a URL
+///
+///
+pub async fn upload_content(data: Vec<u8>, content_type: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder().build()?;
 
-    let digest = md5::compute(data);
-
     let upload_resp = client
-        .put(format!("https://up.em32.site/?hash={:x}", digest))
-        .header("Content-Type", "text/plain; charset=utf-8")
-        .body(data.to_string())
+        .put("https://up.em32.site")
+        .header("Content-Type", content_type)
+        .body(data)
         .send()
         .await
         .context("Failed to upload text")?;
@@ -27,5 +28,8 @@ pub async fn upload_text(data: &str) -> anyhow::Result<String> {
 #[tokio::test]
 async fn test_upload() {
     let data = "hello world";
-    upload_text(data).await.unwrap();
+    let url = upload_content(data.as_bytes().to_vec(), "text/plain; charset=utf-8")
+        .await
+        .unwrap();
+    println!("{url}");
 }

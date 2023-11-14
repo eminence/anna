@@ -4,12 +4,22 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
-use anna::upload_text;
+use anna::upload_content;
+use async_openai::types::{
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestFunctionMessage,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionResponseMessage,
+};
+use async_openai::types::{
+    ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText,
+};
 use futures::prelude::*;
 use irc::client::prelude::*;
-use openai::ChatMessage;
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "achin",
@@ -114,33 +124,53 @@ pub fn trim_botname(msg: &str) -> &str {
     }
 }
 
+fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatCompletionRequestMessage {
+    #![allow(deprecated)]
+    match msg.role {
+        async_openai::types::Role::System => {
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content: msg.content,
+                role: msg.role,
+            })
+        }
+        async_openai::types::Role::User => {
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: msg.content.map(Into::into),
+                role: msg.role,
+            })
+        }
+        async_openai::types::Role::Assistant => {
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: msg.content,
+                role: msg.role,
+                tool_calls: msg.tool_calls,
+                function_call: msg.function_call,
+            })
+        }
+        async_openai::types::Role::Tool => {
+            ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                role: msg.role,
+                content: msg.content,
+                tool_call_id: msg.tool_calls.unwrap().pop().unwrap().id,
+            })
+        }
+        async_openai::types::Role::Function => {
+            ChatCompletionRequestMessage::Function(ChatCompletionRequestFunctionMessage {
+                role: msg.role,
+                content: msg.content,
+                name: msg.function_call.unwrap().name,
+            })
+        }
+    }
+}
+
 /// Contains a list of all relevant messages for a given IRC channel
 #[derive(Default, Debug, Clone)]
 pub struct MessageMap {
-    inner: Arc<Mutex<HashMap<String, VecDeque<ChatMessage>>>>,
+    inner: Arc<Mutex<HashMap<String, VecDeque<ChatCompletionRequestMessage>>>>,
 }
 impl MessageMap {
-    pub fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
-        let mut inner = self.inner.lock().expect("inner lock is poisoned");
-        let m = if !inner.contains_key(channel) {
-            inner.insert(channel.to_string(), Default::default());
-            inner
-                .get_mut(channel)
-                .expect("Failed to get just inserted item")
-        } else {
-            inner.get_mut(channel).expect("Failed to get known item")
-        };
-        m.push_back(ChatMessage {
-            role: openai::ChatCompletionRole::User,
-            content: Some(format!("<{sender}> {message}")),
-            name: None,
-            function_call: None,
-        });
-        if m.len() > 50 {
-            m.pop_front();
-        }
-    }
-    pub fn insert_selfmsg(&mut self, channel: &str, messages: &[ChatMessage]) {
+    pub async fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
         let m = if !inner.contains_key(channel) {
             inner.insert(channel.to_string(), Default::default());
@@ -151,15 +181,95 @@ impl MessageMap {
             inner.get_mut(channel).expect("Failed to get known item")
         };
 
-        for message in messages {
-            m.push_back(message.clone());
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        // look for things that look like URLs in the message
+
+        let urls: Vec<_> = message
+            .split_ascii_whitespace()
+            .filter(|s| {
+                s.starts_with("https://")
+                // (s.starts_with("https://")
+                //     && (s.ends_with(".jpg") || s.ends_with(".jpeg") || s.ends_with(".png")))
+                //     || s.starts_with("https://up.em32.site/")
+            })
+            .collect();
+
+        if urls.is_empty() {
+            let msg = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: Some(ChatCompletionRequestUserMessageContent::Text(format!(
+                    "<{sender}> {message}"
+                ))),
+                role: async_openai::types::Role::User,
+            });
+            m.push_back(msg);
+        } else {
+            let mut content: Vec<ChatCompletionRequestMessageContentPart> =
+                vec![ChatCompletionRequestMessageContentPartText::from(format!(
+                    "<{sender}> {message}"
+                ))
+                .into()];
+            for url in urls {
+                dbg!(&url);
+                if let Some(ct) = client
+                    .head(url)
+                    .send()
+                    .await
+                    .ok()
+                    .and_then(|resp| resp.headers().get(reqwest::header::CONTENT_TYPE).cloned())
+                    .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()))
+                {
+                    dbg!(&ct);
+                    if ct.starts_with("image/") {
+                        content.push(
+                            ChatCompletionRequestMessageContentPartImage {
+                                r#type: "image_url".into(),
+                                image_url: url.into(),
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+            let msg = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: Some(ChatCompletionRequestUserMessageContent::Array(content)),
+                role: async_openai::types::Role::User,
+            });
+            m.push_back(msg);
         }
 
         if m.len() > 50 {
             m.pop_front();
         }
     }
-    pub fn get_chat_messages(&self, channel: &str, all_context: bool) -> Vec<ChatMessage> {
+    pub fn insert_selfmsg(&mut self, channel: &str, messages: &[ChatCompletionResponseMessage]) {
+        let mut inner = self.inner.lock().expect("inner lock is poisoned");
+        let m = if !inner.contains_key(channel) {
+            inner.insert(channel.to_string(), Default::default());
+            inner
+                .get_mut(channel)
+                .expect("Failed to get just inserted item")
+        } else {
+            inner.get_mut(channel).expect("Failed to get known item")
+        };
+
+        for msg in messages {
+            m.push_back(reponse_msg_to_request_msg(msg.to_owned()));
+        }
+
+        if m.len() > 50 {
+            m.pop_front();
+        }
+    }
+    pub fn get_chat_messages(
+        &self,
+        channel: &str,
+        all_context: bool,
+    ) -> Vec<ChatCompletionRequestMessage> {
         let inner = self.inner.lock().expect("inner lock is poisoned");
         let mut v = Vec::new();
 
@@ -301,7 +411,7 @@ impl<'a> ChatInstruction<'a> {
 
 // Takes all owned parameters because we'll spawn an async closure in here
 fn spawn_chat_completion_inner<'a>(
-    for_chat: Vec<ChatMessage>,
+    for_chat: Vec<ChatCompletionRequestMessage>,
     inst: ChatInstruction<'a>,
     resp_target: String,
     target: String,
@@ -318,14 +428,17 @@ fn spawn_chat_completion_inner<'a>(
                 }
                 // we need to save all messages, but only the last one will be sent back to IRC
                 match resp.last() {
-                    Some(ChatMessage {
-                        role: _,
+                    Some(ChatCompletionResponseMessage {
                         content: Some(resp_content),
-                        name: _,
-                        function_call: _,
+                        ..
                     }) => {
                         if inst.pastebin {
-                            match upload_text(&resp_content).await {
+                            match upload_content(
+                                resp_content.as_bytes().to_vec(),
+                                "text/plain; charset=utf-8",
+                            )
+                            .await
+                            {
                                 Ok(url) => {
                                     let _ = sender.send_privmsg(
                                         &resp_target,
@@ -346,7 +459,12 @@ fn spawn_chat_completion_inner<'a>(
                                     let _ = sender.send_privmsg(&resp_target, line.trim());
                                 } else {
                                     // upload
-                                    if let Ok(url) = upload_text(&resp_content).await {
+                                    if let Ok(url) = upload_content(
+                                        resp_content.as_bytes().to_vec(),
+                                        "text/plain; charset=utf-8",
+                                    )
+                                    .await
+                                    {
                                         let _ = sender.send_privmsg(&resp_target, format!("(there were more lines in the reply, read more at {url})"));
                                     } else {
                                         let _ = sender.send_privmsg(&resp_target, "(there were more lines in the reply, but I'm only sending the first few)");
@@ -372,7 +490,7 @@ fn spawn_chat_completion_inner<'a>(
 }
 
 fn spawn_chat_completion<'a>(
-    for_chat: Vec<ChatMessage>,
+    for_chat: Vec<ChatCompletionRequestMessage>,
     inst: ChatInstruction<'a>,
     resp_target: impl ToString,
     target: impl ToString,
@@ -478,26 +596,23 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(inst) = get_chat_instruction(msg) {
                     dbg!(&inst);
                     if inst.save && !inst.msg.trim().is_empty() {
-                        message_map.insert_usermsg(target, source_nick, inst.msg.trim());
+                        message_map.insert_usermsg(target, source_nick, inst.msg.trim()).await;
                     }
 
                     // get a list of all known messages for the given channel (or only the last message if inst.context = false)
                     let mut for_chat = message_map.get_chat_messages(target, inst.context);
                     if !inst.save {
                         // our message wasn't inserted into the message map, so we have to explictly append it to what we send to openai
-                        for_chat.push(ChatMessage {
-                            role: openai::ChatCompletionRole::User,
-                            content: Some(format!("<{}> {}", source_nick, inst.msg.trim())),
-                            name: None,
-                            function_call: None,
-                        });
+                        for_chat.push(ChatCompletionRequestMessage::User(
+                            ChatCompletionRequestUserMessage {
+                                content: Some(ChatCompletionRequestUserMessageContent::Text(
+                                    format!("<{}> {}", source_nick, inst.msg.trim()),
+                                )),
+                                role: async_openai::types::Role::User,
+                            },
+                        ));
                     }
                     dbg!(&for_chat);
-                    // let resp_target = resp_target.to_string();
-                    // let target = target.to_string();
-                    // let sender = sender.clone();
-                    // let source_nick = source_nick.to_string();
-                    // let mut message_map = message_map.clone();
                     spawn_chat_completion(
                         for_chat,
                         inst,
@@ -540,7 +655,7 @@ async fn main() -> anyhow::Result<()> {
             if target.starts_with('#') {
                 // only certain users are comfortable with all their messages being used
                 if OPT_IN_ALL_CAPTURE.contains(&source_nick) {
-                    message_map.insert_usermsg(target, source_nick, msg);
+                    message_map.insert_usermsg(target, source_nick, msg).await;
                 }
             }
         }
@@ -620,4 +735,17 @@ fn test_chat_instruction() {
     assert!(!inst.save);
     assert!(inst.pastebin);
     assert_eq!(inst.msg, "hello    world");
+}
+
+#[tokio::test]
+async fn test_image_detection() {
+    let mut messages = MessageMap::default();
+
+    messages.insert_usermsg(
+        "#em32",
+        "achin",
+        "Please describe this URL: https://i.imgur.com/Sb4xdqa.jpeg",
+    ).await;
+
+    dbg!(messages.inner);
 }
