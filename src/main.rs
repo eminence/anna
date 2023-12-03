@@ -11,8 +11,8 @@ use anna::upload_content;
 use async_openai::types::{
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestFunctionMessage,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionResponseMessage,
+    ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionResponseMessage,
 };
 use async_openai::types::{
     ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartImage,
@@ -265,6 +265,12 @@ impl MessageMap {
             m.pop_front();
         }
     }
+    pub fn clear_chat_message(&self, channel: &str) {
+        let mut inner = self.inner.lock().expect("inner lock is poisoned");
+        if let Some(list) = inner.get_mut(channel) {
+            list.clear();
+        }
+    }
     pub fn get_chat_messages(
         &self,
         channel: &str,
@@ -514,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config {
         owners: vec!["achin".into()],
         nickname: Some(BOTNAME.into()),
-        channels: vec!["##em32".into()],
+        channels: vec!["##em32".into(), "#overviewer".into()],
         server: Some("irc.libera.chat".into()),
         use_tls: Some(true),
         ..Default::default()
@@ -567,8 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(to_echo) = msg.strip_prefix("!echo ") {
                     sender.send_privmsg(resp_target, to_echo.trim())?;
                     continue;
-                }
-                if let Some(temp_str) = msg.strip_prefix("!set_temp ") {
+                } else if let Some(temp_str) = msg.strip_prefix("!set_temp ") {
                     if let Ok(temp) = temp_str.parse::<f32>() {
                         if temp.is_finite() {
                             let temp = temp.clamp(0.0, 2.0);
@@ -585,18 +590,18 @@ async fn main() -> anyhow::Result<()> {
                         )?;
                     }
                     continue;
-                }
-                if msg.starts_with("!get_temp") {
+                } else if msg.starts_with("!get_temp") {
                     sender.send_privmsg(
                         resp_target,
                         format!("Current global temp is {}", TEMPERATURE.load()),
                     )?;
                     continue;
-                }
-                if let Some(inst) = get_chat_instruction(msg) {
+                } else if let Some(inst) = get_chat_instruction(msg) {
                     dbg!(&inst);
                     if inst.save && !inst.msg.trim().is_empty() {
-                        message_map.insert_usermsg(target, source_nick, inst.msg.trim()).await;
+                        message_map
+                            .insert_usermsg(target, source_nick, inst.msg.trim())
+                            .await;
                     }
 
                     // get a list of all known messages for the given channel (or only the last message if inst.context = false)
@@ -624,8 +629,7 @@ async fn main() -> anyhow::Result<()> {
                     );
 
                     continue;
-                }
-                if let Some(prompt) = msg.strip_prefix("!img ") {
+                } else if let Some(prompt) = msg.strip_prefix("!img ") {
                     let cloned_sender = sender.clone();
                     let resp_target = resp_target.to_string();
                     let prompt = prompt.to_string();
@@ -650,6 +654,12 @@ async fn main() -> anyhow::Result<()> {
                     });
 
                     continue;
+                } else if msg.starts_with("!clearctx") {
+                    message_map.clear_chat_message(resp_target);
+                    sender.send_privmsg(
+                        resp_target,
+                        format!("Clearing list of saved context for {resp_target}"),
+                    )?;
                 }
             }
             if target.starts_with('#') {
@@ -741,11 +751,13 @@ fn test_chat_instruction() {
 async fn test_image_detection() {
     let mut messages = MessageMap::default();
 
-    messages.insert_usermsg(
-        "#em32",
-        "achin",
-        "Please describe this URL: https://i.imgur.com/Sb4xdqa.jpeg",
-    ).await;
+    messages
+        .insert_usermsg(
+            "#em32",
+            "achin",
+            "Please describe this URL: https://i.imgur.com/Sb4xdqa.jpeg",
+        )
+        .await;
 
     dbg!(messages.inner);
 }

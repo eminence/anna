@@ -6,8 +6,8 @@ use async_openai::{
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionResponseMessage,
-        CreateChatCompletionRequest, CreateImageRequest, Image, ImageQuality,
+        ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateImageRequest, Image,
+        ImageQuality,
     },
 };
 use chrono::Utc;
@@ -266,3 +266,22 @@ async fn test_openai() -> anyhow::Result<()> {
 //     let resp = client.chat().create(chat_request).await;
 //     let _ = dbg!(resp);
 // }
+
+#[tokio::test]
+async fn test_embedding() {
+    let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
+    let client = async_openai::Client::with_config(cfg);
+
+    let res = client
+        .embeddings()
+        .create(async_openai::types::CreateEmbeddingRequest {
+            model: "text-embedding-ada-002".to_string(),
+            input: async_openai::types::EmbeddingInput::String("hello, how are you?".to_string()),
+            encoding_format: None,
+            user: None,
+        })
+        .await
+        .unwrap();
+
+    dbg!(res);
+}
