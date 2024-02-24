@@ -64,13 +64,13 @@ struct Evaluate {
 /// This can return multiple chat messages if a function was called
 pub async fn get_chat(
     messages: Vec<ChatCompletionRequestMessage>,
-    temp: f32,
+    _temp: f32,
 ) -> anyhow::Result<Vec<ChatCompletionResponseMessage>> {
     let _start = std::time::Instant::now();
     println!("Sending chat completion request {:?}", messages.last());
     let now = Utc::now();
 
-    let m = vec![ChatCompletionRequestMessage::System(
+    let mut m = vec![ChatCompletionRequestMessage::System(
         ChatCompletionRequestSystemMessage {
             role: async_openai::types::Role::System,
             content: format!("{}. Current date: {}", SYSTEM_PROMPT, now.date_naive()),
@@ -78,13 +78,15 @@ pub async fn get_chat(
         },
     )];
 
+    m.extend(messages);
+
     let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
     let client = async_openai::Client::with_config(cfg);
 
     let mut resp = client
         .chat()
         .create(CreateChatCompletionRequest {
-            messages,
+            messages: m,
             model: "gpt-4-vision-preview".to_string(),
             max_tokens: Some(4096),
             // temperature: Some(temp),
