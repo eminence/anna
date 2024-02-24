@@ -73,11 +73,8 @@ pub async fn get_chat(
     let m = vec![ChatCompletionRequestMessage::System(
         ChatCompletionRequestSystemMessage {
             role: async_openai::types::Role::System,
-            content: Some(format!(
-                "{}. Current date: {}",
-                SYSTEM_PROMPT,
-                now.date_naive()
-            )),
+            content: format!("{}. Current date: {}", SYSTEM_PROMPT, now.date_naive()),
+            name: None,
         },
     )];
 
@@ -309,6 +306,7 @@ async fn test_embedding() {
             input: async_openai::types::EmbeddingInput::String("hello, how are you?".to_string()),
             encoding_format: None,
             user: None,
+            dimensions: None,
         })
         .await
         .unwrap();

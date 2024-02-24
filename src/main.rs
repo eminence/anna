@@ -130,14 +130,16 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
     match msg.role {
         async_openai::types::Role::System => {
             ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: msg.content,
+                content: msg.content.expect("Missing content"),
                 role: msg.role,
+                name: None,
             })
         }
         async_openai::types::Role::User => {
             ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: msg.content.map(Into::into),
+                content: msg.content.expect("Missing content").into(),
                 role: msg.role,
+                name: None,
             })
         }
         async_openai::types::Role::Assistant => {
@@ -146,12 +148,13 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
                 role: msg.role,
                 tool_calls: msg.tool_calls,
                 function_call: msg.function_call,
+                name: None,
             })
         }
         async_openai::types::Role::Tool => {
             ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
                 role: msg.role,
-                content: msg.content,
+                content: msg.content.expect("Missing content"),
                 tool_call_id: msg.tool_calls.unwrap().pop().unwrap().id,
             })
         }
@@ -202,10 +205,11 @@ impl MessageMap {
 
         if urls.is_empty() {
             let msg = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: Some(ChatCompletionRequestUserMessageContent::Text(format!(
+                content: ChatCompletionRequestUserMessageContent::Text(format!(
                     "<{sender}> {message}"
-                ))),
+                )),
                 role: async_openai::types::Role::User,
+                name: Some(sender.to_string()),
             });
             m.push_back(msg);
         } else {
@@ -237,8 +241,9 @@ impl MessageMap {
                 }
             }
             let msg = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: Some(ChatCompletionRequestUserMessageContent::Array(content)),
+                content: ChatCompletionRequestUserMessageContent::Array(content),
                 role: async_openai::types::Role::User,
+                name: Some(sender.to_string()),
             });
             m.push_back(msg);
         }
@@ -637,13 +642,17 @@ async fn main() -> anyhow::Result<()> {
                     // get a list of all known messages for the given channel (or only the last message if inst.context = false)
                     let mut for_chat = message_map.get_chat_messages(target, inst.context);
                     if !inst.save {
+                        // TODO handle messages with embedded URLs
                         // our message wasn't inserted into the message map, so we have to explictly append it to what we send to openai
                         for_chat.push(ChatCompletionRequestMessage::User(
                             ChatCompletionRequestUserMessage {
-                                content: Some(ChatCompletionRequestUserMessageContent::Text(
-                                    format!("<{}> {}", source_nick, inst.msg.trim()),
+                                content: ChatCompletionRequestUserMessageContent::Text(format!(
+                                    "<{}> {}",
+                                    source_nick,
+                                    inst.msg.trim()
                                 )),
                                 role: async_openai::types::Role::User,
+                                name: Some(source_nick.to_string()),
                             },
                         ));
                     }
