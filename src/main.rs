@@ -174,16 +174,11 @@ pub struct MessageMap {
     inner: Arc<Mutex<HashMap<String, VecDeque<ChatCompletionRequestMessage>>>>,
 }
 impl MessageMap {
-    pub async fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
-        let mut inner = self.inner.lock().expect("inner lock is poisoned");
-        let m = if !inner.contains_key(channel) {
-            inner.insert(channel.to_string(), Default::default());
-            inner
-                .get_mut(channel)
-                .expect("Failed to get just inserted item")
-        } else {
-            inner.get_mut(channel).expect("Failed to get known item")
-        };
+    pub async fn extract_image_urls(
+        sender: &str,
+        message: &str,
+    ) -> Vec<ChatCompletionRequestMessage> {
+        let mut m = Vec::new();
 
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
@@ -191,16 +186,9 @@ impl MessageMap {
             .build()
             .unwrap();
 
-        // look for things that look like URLs in the message
-
         let urls: Vec<_> = message
             .split_ascii_whitespace()
-            .filter(|s| {
-                s.starts_with("https://")
-                // (s.starts_with("https://")
-                //     && (s.ends_with(".jpg") || s.ends_with(".jpeg") || s.ends_with(".png")))
-                //     || s.starts_with("https://up.em32.site/")
-            })
+            .filter(|s| s.starts_with("https://"))
             .collect();
 
         if urls.is_empty() {
@@ -211,7 +199,7 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push_back(msg);
+            m.push(msg);
         } else {
             let mut content: Vec<ChatCompletionRequestMessageContentPart> =
                 vec![ChatCompletionRequestMessageContentPartText::from(format!(
@@ -245,8 +233,25 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push_back(msg);
+            m.push(msg);
         }
+
+        m
+    }
+    pub async fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
+        let mut inner = self.inner.lock().expect("inner lock is poisoned");
+        let m = if !inner.contains_key(channel) {
+            inner.insert(channel.to_string(), Default::default());
+            inner
+                .get_mut(channel)
+                .expect("Failed to get just inserted item")
+        } else {
+            inner.get_mut(channel).expect("Failed to get known item")
+        };
+
+        // look for things that look like URLs in the message
+
+        m.extend(MessageMap::extract_image_urls(sender, message).await);
 
         if m.len() > 50 {
             m.pop_front();
@@ -642,19 +647,9 @@ async fn main() -> anyhow::Result<()> {
                     // get a list of all known messages for the given channel (or only the last message if inst.context = false)
                     let mut for_chat = message_map.get_chat_messages(target, inst.context);
                     if !inst.save {
-                        // TODO handle messages with embedded URLs
                         // our message wasn't inserted into the message map, so we have to explictly append it to what we send to openai
-                        for_chat.push(ChatCompletionRequestMessage::User(
-                            ChatCompletionRequestUserMessage {
-                                content: ChatCompletionRequestUserMessageContent::Text(format!(
-                                    "<{}> {}",
-                                    source_nick,
-                                    inst.msg.trim()
-                                )),
-                                role: async_openai::types::Role::User,
-                                name: Some(source_nick.to_string()),
-                            },
-                        ));
+                        for_chat
+                            .extend(MessageMap::extract_image_urls(source_nick, inst.msg).await);
                     }
                     dbg!(&for_chat);
                     spawn_chat_completion(
