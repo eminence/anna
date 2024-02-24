@@ -5,8 +5,9 @@ use anyhow::{bail, Context};
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateImageRequest, Image,
+        AudioInput, AudioResponseFormat, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessage, ChatCompletionResponseMessage,
+        CreateChatCompletionRequest, CreateImageRequest, CreateTranslationRequest, Image,
         ImageQuality,
     },
 };
@@ -156,6 +157,47 @@ pub async fn get_tts(text: &str) -> anyhow::Result<String> {
     let rehosted_url = upload_content(resp.bytes.to_vec(), "audio/ogg").await?;
 
     Ok(format!("{rehosted_url}.ogg"))
+}
+
+pub async fn get_translation(audio_url: &str, prompt: Option<String>) -> anyhow::Result<String> {
+    // filename is the name of the file to be translated
+    let filename = audio_url.split('/').last().unwrap_or("unknown.ogg");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // download the audio adnd store as a Bytes object
+    let resp = client.get(audio_url).send().await?;
+
+    // make sure content type is audio:
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()));
+    if !matches!(ct, Some(s) if s.starts_with("audio/")) {
+        bail!("Content type is not audio")
+    }
+
+    let audio = resp.bytes().await?;
+
+    let translation_request = CreateTranslationRequest {
+        file: AudioInput::from_bytes(filename.into(), audio),
+        model: "whisper-1".into(),
+        prompt,
+        response_format: Some(AudioResponseFormat::Json),
+        temperature: None,
+    };
+    dbg!(&translation_request);
+
+    let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
+    let client = async_openai::Client::with_config(cfg);
+
+    let resp = client.audio().translate(translation_request).await?;
+
+    Ok(resp.text)
 }
 
 #[tokio::test]
