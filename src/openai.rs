@@ -138,6 +138,36 @@ pub async fn get_image(prompt: &str) -> anyhow::Result<String> {
     anyhow::bail!("unknown error")
 }
 
+/// Returns a URL to the uploaded speech
+pub async fn get_tts(text: &str) -> anyhow::Result<String> {
+    let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
+    let client = async_openai::Client::with_config(cfg);
+
+    let resp = client
+        .audio()
+        .speech(async_openai::types::CreateSpeechRequest {
+            input: text.into(),
+            model: async_openai::types::SpeechModel::Tts1Hd,
+            voice: async_openai::types::Voice::Echo,
+            response_format: Some(async_openai::types::SpeechResponseFormat::Opus),
+            speed: None,
+        })
+        .await?;
+
+    let rehosted_url = upload_content(resp.bytes.to_vec(), "audio/ogg").await?;
+
+    Ok(format!("{rehosted_url}.ogg"))
+}
+
+#[tokio::test]
+async fn test_tts() {
+    let url = get_tts("Hello, how are you doing on this fine evening?")
+        .await
+        .unwrap();
+
+    println!("{url}")
+}
+
 #[tokio::test]
 async fn test_openai() -> anyhow::Result<()> {
     let client = reqwest::Client::new();

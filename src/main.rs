@@ -20,6 +20,7 @@ use async_openai::types::{
 };
 use futures::prelude::*;
 use irc::client::prelude::*;
+use openai::get_tts;
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "achin",
@@ -314,6 +315,7 @@ fn get_chat_instruction(line: &str) -> Option<ChatInstruction> {
         context: true,
         save: true,
         pastebin: false,
+        tts: false,
     };
 
     if let Some(data) = line.trim().strip_prefix("!chat") {
@@ -373,6 +375,8 @@ struct ChatInstruction<'a> {
     save: bool,
     /// Whether or not to send only a pastebin link
     pastebin: bool,
+    /// Whether to send the reply as audio
+    tts: bool,
 }
 
 impl<'a> ChatInstruction<'a> {
@@ -383,6 +387,7 @@ impl<'a> ChatInstruction<'a> {
             context: true,
             save: true,
             pastebin: false,
+            tts: false,
         }
     }
     /// Updates this object
@@ -409,6 +414,9 @@ impl<'a> ChatInstruction<'a> {
                 if let Some(val) = s.next().and_then(|s| s.parse::<f32>().ok()) {
                     self.temp = val.clamp(0.0, 2.0)
                 }
+            }
+            "tts" => {
+                self.tts = boolify(s.next()).unwrap_or(true);
             }
             _ => (),
         }
@@ -449,6 +457,18 @@ fn spawn_chat_completion_inner<'a>(
                                     let _ = sender.send_privmsg(
                                         &resp_target,
                                         format!("{source_nick}: {url}",),
+                                    );
+                                }
+                                Err(e) => {
+                                    dbg!(e);
+                                }
+                            }
+                        } else if inst.tts {
+                            match get_tts(&resp_content).await {
+                                Ok(url) => {
+                                    let _ = sender.send_privmsg(
+                                        &resp_target,
+                                        format!("{source_nick}: {url}"),
                                     );
                                 }
                                 Err(e) => {
@@ -596,6 +616,16 @@ async fn main() -> anyhow::Result<()> {
                         format!("Current global temp is {}", TEMPERATURE.load()),
                     )?;
                     continue;
+                } else if let Some(msg) = msg.strip_prefix("!tts ") {
+                    let sender = sender.clone();
+                    let msg = msg.to_string();
+                    let resp_target = resp_target.to_string();
+                    tokio::spawn(async move {
+                        match get_tts(&msg).await {
+                            Ok(url) => sender.send_privmsg(resp_target, url),
+                            Err(e) => sender.send_privmsg(resp_target, format!("Error: {e}")),
+                        }
+                    });
                 } else if let Some(inst) = get_chat_instruction(msg) {
                     dbg!(&inst);
                     if inst.save && !inst.msg.trim().is_empty() {
@@ -744,7 +774,17 @@ fn test_chat_instruction() {
     assert!(inst.context);
     assert!(!inst.save);
     assert!(inst.pastebin);
+    assert!(!inst.tts);
     assert_eq!(inst.msg, "hello    world");
+
+    let inst = get_chat_instruction("!chat --tts hello").unwrap();
+    assert!(inst.tts);
+
+    let inst = get_chat_instruction("!chat --tts=yes hello").unwrap();
+    assert!(inst.tts);
+
+    let inst = get_chat_instruction("!chat --tts=false hello").unwrap();
+    assert!(!inst.tts);
 }
 
 #[tokio::test]
