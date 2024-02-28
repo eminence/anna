@@ -652,6 +652,22 @@ async fn main() -> anyhow::Result<()> {
                             }
                         });
                     }
+                } else if let Some(msg) = msg.strip_prefix("!transcribe ") {
+                    let sender = sender.clone();
+                    let resp_target = resp_target.to_string();
+                    let mut split = msg.splitn(2, ' ');
+                    let url = split.next().unwrap_or("");
+                    let prompt = split.next();
+                    if url.starts_with("https://") {
+                        let url = url.to_string();
+                        let prompt = prompt.map(|s| s.to_string());
+                        tokio::spawn(async move {
+                            match openai::get_transcription(&url, prompt).await {
+                                Ok(translated) => sender.send_privmsg(resp_target, translated),
+                                Err(e) => sender.send_privmsg(resp_target, format!("Error: {e}")),
+                            }
+                        });
+                    }
                 } else if let Some(inst) = get_chat_instruction(msg) {
                     dbg!(&inst);
                     if inst.save && !inst.msg.trim().is_empty() {

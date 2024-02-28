@@ -7,8 +7,8 @@ use async_openai::{
     types::{
         AudioInput, AudioResponseFormat, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessage, ChatCompletionResponseMessage,
-        CreateChatCompletionRequest, CreateImageRequest, CreateTranslationRequest, Image,
-        ImageQuality,
+        CreateChatCompletionRequest, CreateImageRequest, CreateTranscriptionRequest,
+        CreateTranslationRequest, Image, ImageQuality,
     },
 };
 use chrono::Utc;
@@ -177,7 +177,7 @@ pub async fn get_translation(audio_url: &str, prompt: Option<String>) -> anyhow:
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()));
-    if !matches!(ct, Some(s) if s.starts_with("audio/")) {
+    if !matches!(ct, Some(s) if s.starts_with("audio/") || s.starts_with("video/")) {
         bail!("Content type is not audio")
     }
 
@@ -190,12 +190,54 @@ pub async fn get_translation(audio_url: &str, prompt: Option<String>) -> anyhow:
         response_format: Some(AudioResponseFormat::Json),
         temperature: None,
     };
-    dbg!(&translation_request);
+    // dbg!(&translation_request);
 
     let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
     let client = async_openai::Client::with_config(cfg);
 
     let resp = client.audio().translate(translation_request).await?;
+
+    Ok(resp.text)
+}
+
+pub async fn get_transcription(audio_url: &str, prompt: Option<String>) -> anyhow::Result<String> {
+    // filename is the name of the file to be translated
+    let filename = audio_url.split('/').last().unwrap_or("unknown.ogg");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // download the audio adnd store as a Bytes object
+    let resp = client.get(audio_url).send().await?;
+
+    // make sure content type is audio:
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()));
+    if !matches!(ct, Some(s) if s.starts_with("audio/") || s.starts_with("video/")) {
+        bail!("Content type is not audio")
+    }
+
+    let audio = resp.bytes().await?;
+
+    let translation_request = CreateTranscriptionRequest {
+        file: AudioInput::from_bytes(filename.into(), audio),
+        model: "whisper-1".into(),
+        prompt,
+        response_format: Some(AudioResponseFormat::Json),
+        temperature: None,
+        language: None,
+    };
+    // dbg!(&translation_request);
+
+    let cfg = OpenAIConfig::new().with_api_key(crate::secrets::OPENAPI_KEY);
+    let client = async_openai::Client::with_config(cfg);
+
+    let resp = client.audio().transcribe(translation_request).await?;
 
     Ok(resp.text)
 }
