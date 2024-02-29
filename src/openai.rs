@@ -166,6 +166,7 @@ pub async fn get_translation(audio_url: &str, prompt: Option<String>) -> anyhow:
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(10))
+        .user_agent("anna/1.0.0")
         .build()
         .unwrap();
 

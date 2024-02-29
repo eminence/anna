@@ -8,6 +8,7 @@ use std::{
 };
 
 use anna::upload_content;
+use anyhow::{bail, Context};
 use async_openai::types::{
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestFunctionMessage,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
@@ -169,22 +170,65 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
 }
 
 /// Contains a list of all relevant messages for a given IRC channel
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct MessageMap {
     inner: Arc<Mutex<HashMap<String, VecDeque<ChatCompletionRequestMessage>>>>,
+    client: reqwest::Client,
 }
+
+impl Default for MessageMap {
+    fn default() -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(10))
+            .user_agent("anna/1.0.0")
+            .build()
+            .unwrap();
+        Self {
+            inner: Default::default(),
+            client,
+        }
+    }
+}
+
 impl MessageMap {
+    pub async fn get_content_type(&self, url: &str) -> anyhow::Result<String> {
+        // First, try a head request
+        if let Ok(resp) = self.client.head(url).send().await {
+            // extract the Content-Type header if the response was successful
+            if dbg!(resp.status()).is_success() {
+                if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+                    return Ok(ct.to_str()?.to_owned());
+                }
+            }
+            println!("Retrying with GET request");
+
+            // if the resp is a 404, then don't try a GET request
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                bail!("404");
+            }
+        }
+
+        // if the head request failed, try a GET request
+        let resp = self.client.get(url).send().await?;
+
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()))
+            .context("Failed to get content type")?;
+
+        // let body = resp.text().await?;
+        // println!("Got body: {body}");
+
+        Ok(ct)
+    }
     pub async fn extract_image_urls(
+        &self,
         sender: &str,
         message: &str,
     ) -> Vec<ChatCompletionRequestMessage> {
         let mut m = Vec::new();
-
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
 
         let urls: Vec<_> = message
             .split_ascii_whitespace()
@@ -208,14 +252,7 @@ impl MessageMap {
                 .into()];
             for url in urls {
                 dbg!(&url);
-                if let Some(ct) = client
-                    .head(url)
-                    .send()
-                    .await
-                    .ok()
-                    .and_then(|resp| resp.headers().get(reqwest::header::CONTENT_TYPE).cloned())
-                    .and_then(|ct| ct.to_str().ok().map(|s| s.to_owned()))
-                {
+                if let Some(ct) = self.get_content_type(url).await.ok() {
                     dbg!(&ct);
                     if ct.starts_with("image/") {
                         content.push(
@@ -251,7 +288,7 @@ impl MessageMap {
 
         // look for things that look like URLs in the message
 
-        m.extend(MessageMap::extract_image_urls(sender, message).await);
+        m.extend(self.extract_image_urls(sender, message).await);
 
         if m.len() > 50 {
             m.pop_front();
@@ -681,7 +718,7 @@ async fn main() -> anyhow::Result<()> {
                     if !inst.save {
                         // our message wasn't inserted into the message map, so we have to explictly append it to what we send to openai
                         for_chat
-                            .extend(MessageMap::extract_image_urls(source_nick, inst.msg).await);
+                            .extend(message_map.extract_image_urls(source_nick, inst.msg).await);
                     }
                     dbg!(&for_chat);
                     spawn_chat_completion(
