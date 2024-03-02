@@ -523,28 +523,12 @@ fn spawn_chat_completion_inner<'a>(
                                 }
                             }
                         } else {
-                            let mut length = 0;
-                            for line in
-                                split_long_message_for_irc(trim_botname(&resp_content)).iter()
-                            {
-                                length += 1 + (line.trim().len() as f32 / 150.0).floor() as i32;
-                                if length < 8 {
-                                    let _ = sender.send_privmsg(&resp_target, line.trim());
-                                } else {
-                                    // upload
-                                    if let Ok(url) = upload_content(
-                                        resp_content.as_bytes().to_vec(),
-                                        "text/plain; charset=utf-8",
-                                    )
-                                    .await
-                                    {
-                                        let _ = sender.send_privmsg(&resp_target, format!("(there were more lines in the reply, read more at {url})"));
-                                    } else {
-                                        let _ = sender.send_privmsg(&resp_target, "(there were more lines in the reply, but I'm only sending the first few)");
-                                    }
-                                    break;
-                                }
-                            }
+                            send_possibly_long_message(
+                                sender,
+                                &resp_target,
+                                trim_botname(resp_content),
+                            )
+                            .await;
                         }
                     }
                     _ => {}
@@ -684,8 +668,13 @@ async fn main() -> anyhow::Result<()> {
                         let prompt = prompt.map(|s| s.to_string());
                         tokio::spawn(async move {
                             match openai::get_translation(&url, prompt).await {
-                                Ok(translated) => sender.send_privmsg(resp_target, translated),
-                                Err(e) => sender.send_privmsg(resp_target, format!("Error: {e}")),
+                                Ok(translated) => {
+                                    send_possibly_long_message(sender, &resp_target, &translated)
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = sender.send_privmsg(resp_target, format!("Error: {e}"));
+                                }
                             }
                         });
                     }
@@ -700,8 +689,13 @@ async fn main() -> anyhow::Result<()> {
                         let prompt = prompt.map(|s| s.to_string());
                         tokio::spawn(async move {
                             match openai::get_transcription(&url, prompt).await {
-                                Ok(translated) => sender.send_privmsg(resp_target, translated),
-                                Err(e) => sender.send_privmsg(resp_target, format!("Error: {e}")),
+                                Ok(translated) => {
+                                    send_possibly_long_message(sender, &resp_target, &translated)
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = sender.send_privmsg(resp_target, format!("Error: {e}"));
+                                }
                             }
                         });
                     }
@@ -777,6 +771,29 @@ async fn main() -> anyhow::Result<()> {
     client.send_quit("Bye")?;
 
     Ok(())
+}
+
+async fn send_possibly_long_message(sender: Sender, resp_target: &str, msg: &str) {
+    let mut length = 0;
+    for line in split_long_message_for_irc(msg).iter() {
+        length += 1 + (line.trim().len() as f32 / 150.0).floor() as i32;
+        if length < 8 {
+            let _ = sender.send_privmsg(resp_target, line.trim());
+        } else {
+            // upload
+            if let Ok(url) =
+                upload_content(msg.as_bytes().to_vec(), "text/plain; charset=utf-8").await
+            {
+                let _ = sender.send_privmsg(
+                    &resp_target,
+                    format!("(there were more lines in the reply, read more at {url})"),
+                );
+            } else {
+                let _ = sender.send_privmsg(&resp_target, "(there were more lines in the reply, but there was an error uploading the content)");
+            }
+            break;
+        }
+    }
 }
 
 fn split_long_message_for_irc(msg: &str) -> Vec<String> {
