@@ -236,6 +236,7 @@ pub async fn get_transcription(audio_url: &str, prompt: Option<String>) -> anyho
         response_format: Some(AudioResponseFormat::Json),
         temperature: None,
         language: None,
+        timestamp_granularities: None
     };
     // dbg!(&translation_request);
 
