@@ -68,7 +68,11 @@ pub async fn get_chat(
     _temp: f32,
 ) -> anyhow::Result<Vec<ChatCompletionResponseMessage>> {
     let _start = std::time::Instant::now();
-    println!("Sending chat completion request {:?}", messages.last());
+    println!(
+        "Sending chat completion request ({} total messages) {:?}",
+        messages.len(),
+        messages.last()
+    );
     let now = Utc::now();
 
     let mut m = vec![ChatCompletionRequestMessage::System(

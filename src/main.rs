@@ -19,6 +19,7 @@ use async_openai::types::{
     ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText,
 };
+use chrono::{DateTime, Utc};
 use futures::prelude::*;
 use irc::client::prelude::*;
 use openai::get_tts;
@@ -172,7 +173,7 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
 /// Contains a list of all relevant messages for a given IRC channel
 #[derive(Debug, Clone)]
 pub struct MessageMap {
-    inner: Arc<Mutex<HashMap<String, VecDeque<ChatCompletionRequestMessage>>>>,
+    inner: Arc<Mutex<HashMap<String, VecDeque<(DateTime<Utc>, ChatCompletionRequestMessage)>>>>,
     client: reqwest::Client,
 }
 
@@ -227,7 +228,7 @@ impl MessageMap {
         &self,
         sender: &str,
         message: &str,
-    ) -> Vec<ChatCompletionRequestMessage> {
+    ) -> Vec<(DateTime<Utc>, ChatCompletionRequestMessage)> {
         let mut m = Vec::new();
 
         let urls: Vec<_> = message
@@ -243,7 +244,7 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push(msg);
+            m.push((Utc::now(), msg));
         } else {
             let mut content: Vec<ChatCompletionRequestMessageContentPart> =
                 vec![ChatCompletionRequestMessageContentPartText::from(format!(
@@ -270,10 +271,25 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push(msg);
+            m.push((Utc::now(), msg));
         }
 
         m
+    }
+    fn trim_message_for_age_and_contextsize(
+        v: &mut VecDeque<(DateTime<Utc>, ChatCompletionRequestMessage)>,
+    ) {
+        // remove any message older than 24 hours
+        let now = Utc::now();
+        while let Some((dt, _)) = v.front() {
+            if now.signed_duration_since(*dt).num_hours() > 24 {
+                v.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // todo make sure we're below a certain context size (as measured in tokens)
     }
     pub async fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
@@ -290,9 +306,7 @@ impl MessageMap {
 
         m.extend(self.extract_image_urls(sender, message).await);
 
-        if m.len() > 50 {
-            m.pop_front();
-        }
+        MessageMap::trim_message_for_age_and_contextsize(m);
     }
     pub fn insert_selfmsg(&mut self, channel: &str, messages: &[ChatCompletionResponseMessage]) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
@@ -306,12 +320,10 @@ impl MessageMap {
         };
 
         for msg in messages {
-            m.push_back(reponse_msg_to_request_msg(msg.to_owned()));
+            m.push_back((Utc::now(), reponse_msg_to_request_msg(msg.to_owned())));
         }
 
-        if m.len() > 50 {
-            m.pop_front();
-        }
+        MessageMap::trim_message_for_age_and_contextsize(m);
     }
     pub fn clear_chat_message(&self, channel: &str) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
@@ -329,11 +341,11 @@ impl MessageMap {
 
         if let Some(list) = inner.get(channel) {
             if all_context {
-                v.extend(list.iter().cloned());
+                v.extend(list.iter().map(|(_, a)| a).cloned());
                 // for msg in list {
                 //     v.push(msg.clone());
                 // }
-            } else if let Some(elem) = list.back() {
+            } else if let Some((_, elem)) = list.back() {
                 v.push(elem.clone());
             }
         }
@@ -711,8 +723,13 @@ async fn main() -> anyhow::Result<()> {
                     let mut for_chat = message_map.get_chat_messages(target, inst.context);
                     if !inst.save {
                         // our message wasn't inserted into the message map, so we have to explictly append it to what we send to openai
-                        for_chat
-                            .extend(message_map.extract_image_urls(source_nick, inst.msg).await);
+                        for_chat.extend(
+                            message_map
+                                .extract_image_urls(source_nick, inst.msg)
+                                .await
+                                .into_iter()
+                                .map(|(_, a)| a),
+                        );
                     }
                     dbg!(&for_chat);
                     spawn_chat_completion(
