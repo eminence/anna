@@ -99,6 +99,9 @@ pub async fn get_chat(
         })
         .await?;
 
+    if let Some(usage) = resp.usage {
+        println!("Chat API usage: {:?}", usage);
+    }
     let resp_msg = resp.choices.pop().context("Missing a response")?.message;
 
     Ok(vec![resp_msg])
