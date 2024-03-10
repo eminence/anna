@@ -170,10 +170,52 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
     }
 }
 
+#[derive(Debug)]
+pub struct ChatMessageThing {
+    /// When this message was generated
+    date: DateTime<Utc>,
+    msg: ChatCompletionRequestMessage,
+}
+
+impl ChatMessageThing {
+    pub fn new_now(msg: ChatCompletionRequestMessage) -> Self {
+        Self {
+            date: Utc::now(),
+            msg,
+        }
+    }
+    pub fn get_for_api(&self, now: DateTime<Utc>) -> ChatCompletionRequestMessage {
+        if now - self.date < chrono::Duration::hours(1) {
+            return self.msg.clone();
+        }
+        match &self.msg {
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Array(arr),
+                role,
+                name,
+            }) => {
+                let new_arr = arr
+                    .iter()
+                    .filter(|elem| {
+                        matches!(elem, ChatCompletionRequestMessageContentPart::Text(..))
+                    })
+                    .cloned()
+                    .collect();
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Array(new_arr),
+                    role: *role,
+                    name: name.clone(),
+                })
+            }
+            _ => self.msg.clone(),
+        }
+    }
+}
+
 /// Contains a list of all relevant messages for a given IRC channel
 #[derive(Debug, Clone)]
 pub struct MessageMap {
-    inner: Arc<Mutex<HashMap<String, VecDeque<(DateTime<Utc>, ChatCompletionRequestMessage)>>>>,
+    inner: Arc<Mutex<HashMap<String, VecDeque<ChatMessageThing>>>>,
     client: reqwest::Client,
 }
 
@@ -224,11 +266,7 @@ impl MessageMap {
 
         Ok(ct)
     }
-    pub async fn extract_image_urls(
-        &self,
-        sender: &str,
-        message: &str,
-    ) -> Vec<(DateTime<Utc>, ChatCompletionRequestMessage)> {
+    pub async fn extract_image_urls(&self, sender: &str, message: &str) -> Vec<ChatMessageThing> {
         let mut m = Vec::new();
 
         let urls: Vec<_> = message
@@ -244,7 +282,7 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push((Utc::now(), msg));
+            m.push(ChatMessageThing::new_now(msg));
         } else {
             let mut content: Vec<ChatCompletionRequestMessageContentPart> =
                 vec![ChatCompletionRequestMessageContentPartText::from(format!(
@@ -271,18 +309,16 @@ impl MessageMap {
                 role: async_openai::types::Role::User,
                 name: Some(sender.to_string()),
             });
-            m.push((Utc::now(), msg));
+            m.push(ChatMessageThing::new_now(msg));
         }
 
         m
     }
-    fn trim_message_for_age_and_contextsize(
-        v: &mut VecDeque<(DateTime<Utc>, ChatCompletionRequestMessage)>,
-    ) {
+    fn trim_message_for_age_and_contextsize(v: &mut VecDeque<ChatMessageThing>) {
         // remove any message older than 24 hours
         let now = Utc::now();
-        while let Some((dt, _)) = v.front() {
-            if now.signed_duration_since(*dt).num_hours() > 24 {
+        while let Some(ChatMessageThing { date, .. }) = v.front() {
+            if now.signed_duration_since(*date).num_hours() > 24 {
                 v.pop_front();
             } else {
                 break;
@@ -320,7 +356,9 @@ impl MessageMap {
         };
 
         for msg in messages {
-            m.push_back((Utc::now(), reponse_msg_to_request_msg(msg.to_owned())));
+            m.push_back(ChatMessageThing::new_now(reponse_msg_to_request_msg(
+                msg.to_owned(),
+            )));
         }
 
         MessageMap::trim_message_for_age_and_contextsize(m);
@@ -339,14 +377,17 @@ impl MessageMap {
         let inner = self.inner.lock().expect("inner lock is poisoned");
         let mut v = Vec::new();
 
+        // When converting into a list to sent to the API, don't send images older than
+        // an hour, in order to keep context size down and speed up processing
+        let now = Utc::now();
         if let Some(list) = inner.get(channel) {
             if all_context {
-                v.extend(list.iter().map(|(_, a)| a).cloned());
+                v.extend(list.iter().map(|cmt| cmt.get_for_api(now)));
                 // for msg in list {
                 //     v.push(msg.clone());
                 // }
-            } else if let Some((_, elem)) = list.back() {
-                v.push(elem.clone());
+            } else if let Some(cmt) = list.back() {
+                v.push(cmt.get_for_api(now));
             }
         }
 
@@ -728,7 +769,7 @@ async fn main() -> anyhow::Result<()> {
                                 .extract_image_urls(source_nick, inst.msg)
                                 .await
                                 .into_iter()
-                                .map(|(_, a)| a),
+                                .map(|cmt| cmt.msg),
                         );
                     }
                     dbg!(&for_chat);
