@@ -65,6 +65,7 @@ struct Evaluate {
 /// This can return multiple chat messages if a function was called
 pub async fn get_chat(
     messages: Vec<ChatCompletionRequestMessage>,
+    model: Option<&'static str>,
     _temp: f32,
 ) -> anyhow::Result<Vec<ChatCompletionResponseMessage>> {
     let _start = std::time::Instant::now();
@@ -92,7 +93,7 @@ pub async fn get_chat(
         .chat()
         .create(CreateChatCompletionRequest {
             messages: m,
-            model: "gpt-4-vision-preview".to_string(),
+            model: model.unwrap_or("gpt-4-vision-preview").to_string(),
             max_tokens: Some(4096),
             // temperature: Some(temp),
             ..Default::default()
@@ -239,7 +240,7 @@ pub async fn get_transcription(audio_url: &str, prompt: Option<String>) -> anyho
         response_format: Some(AudioResponseFormat::Json),
         temperature: None,
         language: None,
-        timestamp_granularities: None
+        timestamp_granularities: None,
     };
     // dbg!(&translation_request);
 
@@ -397,7 +398,7 @@ async fn test_embedding() {
     let res = client
         .embeddings()
         .create(async_openai::types::CreateEmbeddingRequest {
-            model: "text-embedding-ada-002".to_string(),
+            model: "text-embedding-3-small".to_string(),
             input: async_openai::types::EmbeddingInput::String("hello, how are you?".to_string()),
             encoding_format: None,
             user: None,

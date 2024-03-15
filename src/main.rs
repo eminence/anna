@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fs::File,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex,
@@ -23,6 +24,7 @@ use chrono::{DateTime, Utc};
 use futures::prelude::*;
 use irc::client::prelude::*;
 use openai::get_tts;
+use serde::{Deserialize, Serialize};
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "achin",
@@ -170,7 +172,7 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessageThing {
     /// When this message was generated
     date: DateTime<Utc>,
@@ -208,6 +210,36 @@ impl ChatMessageThing {
                 })
             }
             _ => self.msg.clone(),
+        }
+    }
+    pub fn get_as_irc_format(&self) -> Option<&str> {
+        match &self.msg {
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content,
+                ..
+            }) => Some(content.as_str()),
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content,
+                ..
+            }) => match content {
+                ChatCompletionRequestUserMessageContent::Text(s) => Some(s),
+                ChatCompletionRequestUserMessageContent::Array(arr) => arr
+                    .iter()
+                    .filter_map(|part| {
+                        if let ChatCompletionRequestMessageContentPart::Text(s) = part {
+                            Some(s.text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .next(),
+            },
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content,
+                ..
+            }) => content.as_deref(),
+            ChatCompletionRequestMessage::Tool(_) => None,
+            ChatCompletionRequestMessage::Function(_) => None,
         }
     }
 }
@@ -318,7 +350,7 @@ impl MessageMap {
         // remove any message older than 24 hours
         let now = Utc::now();
         while let Some(ChatMessageThing { date, .. }) = v.front() {
-            if now.signed_duration_since(*date).num_hours() > 24 {
+            if now.signed_duration_since(*date).num_hours() > 48 {
                 v.pop_front();
             } else {
                 break;
@@ -343,6 +375,11 @@ impl MessageMap {
         m.extend(self.extract_image_urls(sender, message).await);
 
         MessageMap::trim_message_for_age_and_contextsize(m);
+
+        // write out list of message to a file
+        if let Ok(output) = File::create(format!("{channel}.json")) {
+            let _ = serde_json::to_writer_pretty(output, m);
+        }
     }
     pub fn insert_selfmsg(&mut self, channel: &str, messages: &[ChatCompletionResponseMessage]) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
@@ -362,6 +399,11 @@ impl MessageMap {
         }
 
         MessageMap::trim_message_for_age_and_contextsize(m);
+
+        // write out list of message to a file
+        if let Ok(output) = File::create(format!("{channel}.json")) {
+            let _ = serde_json::to_writer_pretty(output, m);
+        }
     }
     pub fn clear_chat_message(&self, channel: &str) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
@@ -534,7 +576,7 @@ fn spawn_chat_completion_inner<'a>(
     mut message_map: MessageMap,
 ) {
     tokio::spawn(async move {
-        match openai::get_chat(for_chat, inst.temp).await {
+        match openai::get_chat(for_chat, None, inst.temp).await {
             Ok(resp) => {
                 dbg!(&resp);
                 if inst.save {
@@ -948,4 +990,45 @@ async fn test_image_detection() {
         .await;
 
     dbg!(messages.inner);
+}
+
+#[tokio::test]
+async fn test_load_from_disk() -> anyhow::Result<()> {
+    let f = File::open("#overviewer.json")?;
+
+    let mut all_msg = String::new();
+    let messages: Vec<ChatMessageThing> = serde_json::from_reader(f)?;
+    for msg in messages.iter().filter_map(|msg| msg.get_as_irc_format()) {
+        all_msg.push_str(msg);
+        all_msg.push('\n');
+    }
+
+    let instruction = "Analyze the _AB_ IRC conversation for tone, content, and general sentiment.  Is there anything you can add to the conversation? If the conversation is lighthearted and jocular, you can add a whimsical comment, but only if it relates to the current conversation.  If the conversation is technical, you add a technically accurate and relevant comment.  It is acceptable to not and anything.  Reply with only the message to be added and nothing else.  If adding noting, then reply only with 'no comment'";
+
+    let completion_messages = vec![
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(
+                instruction.replace("_AB_", "below"),
+            ),
+            role: async_openai::types::Role::User,
+            name: None,
+        }),
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(all_msg),
+            role: async_openai::types::Role::User,
+            name: None,
+        }),
+        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(
+                instruction.replace("_AB_", "above"),
+            ),
+            role: async_openai::types::Role::User,
+            name: None,
+        }),
+    ];
+
+    let resp = openai::get_chat(completion_messages, Some("gpt-4-0125-preview"), 1.0).await?;
+    dbg!(resp);
+
+    Ok(())
 }
