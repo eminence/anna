@@ -8,7 +8,11 @@ use std::{
     time::Duration,
 };
 
-use anna::upload_content;
+use anna::{
+    get_prompt,
+    openai::{self, get_tts},
+    upload_content, ChatMessageThing,
+};
 use anyhow::{bail, Context};
 use async_openai::types::{
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestFunctionMessage,
@@ -20,11 +24,9 @@ use async_openai::types::{
     ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::prelude::*;
 use irc::client::prelude::*;
-use openai::get_tts;
-use serde::{Deserialize, Serialize};
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "achin",
@@ -38,9 +40,6 @@ const BOTNAME: &str = "Charbot9000";
 const BOTNAME_PREFIX1: &str = "Charbot9000:";
 const BOTNAME_PREFIX2: &str = "Charbot9000,";
 const BOTS_TO_IGNORE: &[&str] = &["EmceeOverviewer", "box-bot", "GizmoBot"];
-
-mod openai;
-mod secrets;
 
 /// An atomic F32
 ///
@@ -168,78 +167,6 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
                 content: msg.content,
                 name: msg.function_call.unwrap().name,
             })
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChatMessageThing {
-    /// When this message was generated
-    date: DateTime<Utc>,
-    msg: ChatCompletionRequestMessage,
-}
-
-impl ChatMessageThing {
-    pub fn new_now(msg: ChatCompletionRequestMessage) -> Self {
-        Self {
-            date: Utc::now(),
-            msg,
-        }
-    }
-    pub fn get_for_api(&self, now: DateTime<Utc>) -> ChatCompletionRequestMessage {
-        if now - self.date < chrono::Duration::hours(1) {
-            return self.msg.clone();
-        }
-        match &self.msg {
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Array(arr),
-                role,
-                name,
-            }) => {
-                let new_arr = arr
-                    .iter()
-                    .filter(|elem| {
-                        matches!(elem, ChatCompletionRequestMessageContentPart::Text(..))
-                    })
-                    .cloned()
-                    .collect();
-                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: ChatCompletionRequestUserMessageContent::Array(new_arr),
-                    role: *role,
-                    name: name.clone(),
-                })
-            }
-            _ => self.msg.clone(),
-        }
-    }
-    pub fn get_as_irc_format(&self) -> Option<&str> {
-        match &self.msg {
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content,
-                ..
-            }) => Some(content.as_str()),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content,
-                ..
-            }) => match content {
-                ChatCompletionRequestUserMessageContent::Text(s) => Some(s),
-                ChatCompletionRequestUserMessageContent::Array(arr) => arr
-                    .iter()
-                    .filter_map(|part| {
-                        if let ChatCompletionRequestMessageContentPart::Text(s) = part {
-                            Some(s.text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .next(),
-            },
-            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                content,
-                ..
-            }) => content.as_deref(),
-            ChatCompletionRequestMessage::Tool(_) => None,
-            ChatCompletionRequestMessage::Function(_) => None,
         }
     }
 }
@@ -576,7 +503,7 @@ fn spawn_chat_completion_inner<'a>(
     mut message_map: MessageMap,
 ) {
     tokio::spawn(async move {
-        match openai::get_chat(for_chat, None, inst.temp).await {
+        match openai::get_chat(for_chat, None, Some(inst.temp)).await {
             Ok(resp) => {
                 dbg!(&resp);
                 if inst.save {
@@ -1003,12 +930,12 @@ async fn test_load_from_disk() -> anyhow::Result<()> {
         all_msg.push('\n');
     }
 
-    let instruction = "Analyze the _AB_ IRC conversation for tone, content, and general sentiment.  Is there anything you can add to the conversation? If the conversation is lighthearted and jocular, you can add a whimsical comment, but only if it relates to the current conversation.  If the conversation is technical, you add a technically accurate and relevant comment.  It is acceptable to not and anything.  Reply with only the message to be added and nothing else.  If adding noting, then reply only with 'no comment'";
+    let instruction = get_prompt("interject")?;
 
     let completion_messages = vec![
         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
             content: ChatCompletionRequestUserMessageContent::Text(
-                instruction.replace("_AB_", "below"),
+                instruction.replace("{AB}", "below"),
             ),
             role: async_openai::types::Role::User,
             name: None,
@@ -1020,14 +947,14 @@ async fn test_load_from_disk() -> anyhow::Result<()> {
         }),
         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
             content: ChatCompletionRequestUserMessageContent::Text(
-                instruction.replace("_AB_", "above"),
+                instruction.replace("{AB}", "above"),
             ),
             role: async_openai::types::Role::User,
             name: None,
         }),
     ];
 
-    let resp = openai::get_chat(completion_messages, Some("gpt-4-0125-preview"), 1.0).await?;
+    let resp = openai::get_chat(completion_messages, Some("gpt-4-0125-preview"), Some(0.8)).await?;
     dbg!(resp);
 
     Ok(())

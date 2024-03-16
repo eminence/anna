@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anna::upload_content;
+use crate::{get_prompt, upload_content};
 use anyhow::{bail, Context};
 use async_openai::{
     config::OpenAIConfig,
@@ -13,8 +13,6 @@ use async_openai::{
 };
 use chrono::Utc;
 use schemars::JsonSchema;
-
-pub const SYSTEM_PROMPT: &str = "You are chatbot in an online chat room.  There are multiple people in this chatroom, their names will appear in angle brackets.  You can answer questions, or extend the conversation with interesting comments.  Answer with short messages and do not repeat yourself. Be creative. Your operator is 'achin', and your own name is 'Charbot9000'.";
 
 #[derive(JsonSchema)]
 // Start function definitions
@@ -66,7 +64,7 @@ struct Evaluate {
 pub async fn get_chat(
     messages: Vec<ChatCompletionRequestMessage>,
     model: Option<&'static str>,
-    _temp: f32,
+    temp: Option<f32>,
 ) -> anyhow::Result<Vec<ChatCompletionResponseMessage>> {
     let _start = std::time::Instant::now();
     println!(
@@ -79,7 +77,11 @@ pub async fn get_chat(
     let mut m = vec![ChatCompletionRequestMessage::System(
         ChatCompletionRequestSystemMessage {
             role: async_openai::types::Role::System,
-            content: format!("{}. Current date: {}", SYSTEM_PROMPT, now.date_naive()),
+            content: format!(
+                "{}. Current date: {}",
+                get_prompt("system")?,
+                now.date_naive()
+            ),
             name: None,
         },
     )];
@@ -95,7 +97,7 @@ pub async fn get_chat(
             messages: m,
             model: model.unwrap_or("gpt-4-vision-preview").to_string(),
             max_tokens: Some(4096),
-            // temperature: Some(temp),
+            temperature: temp,
             ..Default::default()
         })
         .await?;
@@ -402,7 +404,7 @@ async fn test_embedding() {
             input: async_openai::types::EmbeddingInput::String("hello, how are you?".to_string()),
             encoding_format: None,
             user: None,
-            dimensions: None,
+            dimensions: Some(32),
         })
         .await
         .unwrap();
