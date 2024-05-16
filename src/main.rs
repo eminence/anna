@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs::File,
+    path::Path,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex,
@@ -9,9 +10,7 @@ use std::{
 };
 
 use anna::{
-    get_prompt,
-    openai::{self, get_tts},
-    upload_content, ChatMessageThing,
+    generate_image_prompt, generate_interjection, openai::{self, get_tts}, upload_content, ChatMessageThing
 };
 use anyhow::{bail, Context};
 use async_openai::types::{
@@ -24,9 +23,10 @@ use async_openai::types::{
     ChatCompletionRequestMessageContentPart, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::prelude::*;
 use irc::client::prelude::*;
+use serde::{Deserialize, Serialize};
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "achin",
@@ -171,10 +171,72 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChannelState {
+    /// List of messages in the channel
+    messages: VecDeque<ChatMessageThing>,
+    /// The last time we sent a message to the channel
+    last_bot_message: DateTime<Utc>,
+    last_interjection_attempt: DateTime<Utc>,
+    /// A possible interjection for this channel
+    interjection: Option<String>,
+}
+
+impl Default for ChannelState {
+    fn default() -> Self {
+        Self {
+            messages: Default::default(),
+            last_bot_message: Utc::now(),
+            last_interjection_attempt: Utc::now(),
+            interjection: Default::default(),
+        }
+    }
+}
+
+impl ChannelState {
+    fn reconstitute(self) -> Self {
+        // when deserilizing, all messages will be read as SystemMessages, and we need to convert them back to the correct type, based on the "role"
+        let messages = self
+            .messages
+            .into_iter()
+            .map(|cmt| cmt.reconstitute())
+            .collect();
+        Self {
+            messages,
+            last_bot_message: self.last_bot_message,
+            last_interjection_attempt: self.last_interjection_attempt,
+            interjection: self.interjection,
+        }
+    }
+    fn trim_message_for_age_and_contextsize(&mut self) {
+        // remove any message older than 24 hours
+        let now = Utc::now();
+        while let Some(ChatMessageThing { date, .. }) = self.messages.front() {
+            if now.signed_duration_since(*date).num_hours() > 48 {
+                self.messages.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // todo make sure we're below a certain context size (as measured in tokens)
+    }
+    pub fn save(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let output = File::create(path)?;
+        serde_json::to_writer_pretty(output, self)?;
+        Ok(())
+    }
+    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let input = File::open(path)?;
+        let state: Self = serde_json::from_reader(input)?;
+        Ok(state.reconstitute())
+    }
+}
+
 /// Contains a list of all relevant messages for a given IRC channel
 #[derive(Debug, Clone)]
 pub struct MessageMap {
-    inner: Arc<Mutex<HashMap<String, VecDeque<ChatMessageThing>>>>,
+    inner: Arc<Mutex<HashMap<String, ChannelState>>>,
     client: reqwest::Client,
 }
 
@@ -194,6 +256,18 @@ impl Default for MessageMap {
 }
 
 impl MessageMap {
+    pub fn with_channel<T>(&self, channel: &str, f: impl FnOnce(&mut ChannelState) -> T) -> T {
+        let mut inner = self.inner.lock().expect("inner lock is poisoned");
+        let chan = inner.entry(channel.to_string()).or_default();
+        f(chan)
+    }
+
+    fn save_interjection(&self, channel: &str, interjection: Option<String>) {
+        self.with_channel(channel, |chan| {
+            chan.interjection = interjection;
+            chan.last_interjection_attempt = Utc::now();
+        });
+    }
     pub async fn get_content_type(&self, url: &str) -> anyhow::Result<String> {
         // First, try a head request
         if let Ok(resp) = self.client.head(url).send().await {
@@ -273,69 +347,79 @@ impl MessageMap {
 
         m
     }
-    fn trim_message_for_age_and_contextsize(v: &mut VecDeque<ChatMessageThing>) {
-        // remove any message older than 24 hours
-        let now = Utc::now();
-        while let Some(ChatMessageThing { date, .. }) = v.front() {
-            if now.signed_duration_since(*date).num_hours() > 48 {
-                v.pop_front();
-            } else {
-                break;
-            }
-        }
 
-        // todo make sure we're below a certain context size (as measured in tokens)
+    fn can_interject(&self, channel: &str) -> bool {
+        self.with_channel(channel, |chan| {
+            // count the number of messages seen in the past hour
+            let now = Utc::now();
+            let num_messages_past_hour = chan
+                .messages
+                .iter()
+                .filter(|cmt| now - cmt.date < chrono::Duration::minutes(30))
+                .count();
+            dbg!(num_messages_past_hour, (now - chan.last_bot_message).num_hours(), (now - chan.last_interjection_attempt).num_minutes());
+
+            now - chan.last_bot_message > chrono::Duration::hours(36)
+                && now - chan.last_interjection_attempt > chrono::Duration::minutes(30)
+                && num_messages_past_hour >= 30
+        })
     }
     pub async fn insert_usermsg(&mut self, channel: &str, sender: &str, message: &str) {
-        let mut inner = self.inner.lock().expect("inner lock is poisoned");
-        let m = if !inner.contains_key(channel) {
-            inner.insert(channel.to_string(), Default::default());
-            inner
-                .get_mut(channel)
-                .expect("Failed to get just inserted item")
-        } else {
-            inner.get_mut(channel).expect("Failed to get known item")
-        };
-
         // look for things that look like URLs in the message
+        let urls = self.extract_image_urls(sender, message).await;
 
-        m.extend(self.extract_image_urls(sender, message).await);
+        self.with_channel(channel, |chan| {
+            chan.messages.extend(urls);
 
-        MessageMap::trim_message_for_age_and_contextsize(m);
+            chan.trim_message_for_age_and_contextsize();
 
-        // write out list of message to a file
-        if let Ok(output) = File::create(format!("{channel}.json")) {
-            let _ = serde_json::to_writer_pretty(output, m);
-        }
+            // write out list of message to a file
+            // if let Ok(output) = File::create(format!("{channel}.json")) {
+            //     let _ = serde_json::to_writer_pretty(output, &chan.messages);
+            // }
+        });
     }
     pub fn insert_selfmsg(&mut self, channel: &str, messages: &[ChatCompletionResponseMessage]) {
-        let mut inner = self.inner.lock().expect("inner lock is poisoned");
-        let m = if !inner.contains_key(channel) {
-            inner.insert(channel.to_string(), Default::default());
-            inner
-                .get_mut(channel)
-                .expect("Failed to get just inserted item")
-        } else {
-            inner.get_mut(channel).expect("Failed to get known item")
-        };
+        self.with_channel(channel, |chan| {
+            chan.last_bot_message = Utc::now();
+            for msg in messages {
+                chan.messages
+                    .push_back(ChatMessageThing::new_now(reponse_msg_to_request_msg(
+                        msg.to_owned(),
+                    )));
+            }
 
-        for msg in messages {
-            m.push_back(ChatMessageThing::new_now(reponse_msg_to_request_msg(
-                msg.to_owned(),
-            )));
-        }
+            chan.trim_message_for_age_and_contextsize();
 
-        MessageMap::trim_message_for_age_and_contextsize(m);
-
-        // write out list of message to a file
-        if let Ok(output) = File::create(format!("{channel}.json")) {
-            let _ = serde_json::to_writer_pretty(output, m);
-        }
+            // write out list of message to a file
+            // if let Ok(output) = File::create(format!("{channel}.json")) {
+            //     let _ = serde_json::to_writer_pretty(output, &chan.messages);
+            // }
+        });
+    }
+    pub fn insert_selfmsg_str(&self, channel: &str, message: &str) {
+        self.with_channel(channel, |chan| {
+            
+            chan.last_bot_message = Utc::now();
+            #[allow(deprecated)]
+            chan.messages.push_back(ChatMessageThing {
+                date: Utc::now(),
+                msg: ChatCompletionRequestMessage::Assistant(
+                    ChatCompletionRequestAssistantMessage {
+                        content: Some(message.to_string()),
+                        role: async_openai::types::Role::Assistant,
+                        name: None,
+                        tool_calls: None,
+                        function_call: None,
+                    },
+                ),
+            })
+        })
     }
     pub fn clear_chat_message(&self, channel: &str) {
         let mut inner = self.inner.lock().expect("inner lock is poisoned");
         if let Some(list) = inner.get_mut(channel) {
-            list.clear();
+            list.messages.clear();
         }
     }
     pub fn get_chat_messages(
@@ -351,29 +435,43 @@ impl MessageMap {
         let now = Utc::now();
         if let Some(list) = inner.get(channel) {
             if all_context {
-                v.extend(list.iter().map(|cmt| cmt.get_for_api(now)));
+                v.extend(list.messages.iter().map(|cmt| cmt.get_for_api(now)));
                 // for msg in list {
                 //     v.push(msg.clone());
                 // }
-            } else if let Some(cmt) = list.back() {
+            } else if let Some(cmt) = list.messages.back() {
                 v.push(cmt.get_for_api(now));
             }
         }
 
         v
     }
+    pub fn save_all(&self) -> anyhow::Result<()> {
+        let inner = self.inner.lock().expect("inner lock is poisoned");
+        for (channel, state) in inner.iter() {
+            state.save(format!("{channel}.json"))?;
+            println!("Saved state for {channel}");
+        }
+        Ok(())
+    }
+    pub fn load(&mut self, channel: &str, force: bool) -> anyhow::Result<()> {
+        let state = ChannelState::load(format!("{channel}.json"))?;
+        let mut inner = self.inner.lock().unwrap();
+        if force || !inner.contains_key(channel) {
+            inner.insert(channel.to_string(), state);
+            Ok(())
+        } else {
+            bail!("Already have state and not forcing")
+        }
+    }
 }
 
 fn boolify(s: Option<&str>) -> Option<bool> {
-    if let Some(s) = s {
-        match s {
-            "y" | "yes" | "true" | "on" => Some(true),
-            "n" | "no" | "false" | "off" => Some(false),
-            _ => None,
-        }
-    } else {
-        None
-    }
+    s.and_then(|s| match s {
+        "y" | "yes" | "true" | "on" => Some(true),
+        "n" | "no" | "false" | "off" => Some(false),
+        _ => None,
+    })
 }
 
 fn get_chat_instruction(line: &str) -> Option<ChatInstruction> {
@@ -610,16 +708,34 @@ async fn main() -> anyhow::Result<()> {
     let sender = client.sender();
     client.identify()?;
 
+    // Channel and message
+
     loop {
         let message: Message = stream.select_next_some().await?;
+        // dbg!(&message);
         match message.command {
             Command::PING(..) | Command::PONG(..) => continue,
             _ => (),
         }
         if let Command::ERROR(..) = message.command {
+            println!("Error: {message}");
             break;
         }
+        if let Command::JOIN(channel, ..) = &message.command {
+            dbg!(&message.command);
+            if let Err(e) = message_map.load(&channel, false) {
+                println!("Failed to load state for channel {channel}: {e}");
+            } else {
+                println!("Loaded state for {channel}");
+            }
+        }
         if let Command::PRIVMSG(target, msg) = &message.command {
+            let from_achin_operator = match &message.prefix {
+                Some(Prefix::Nickname(nick, user, host)) => {
+                    nick == "achin" && user == "~achin" && host == "overviewer/achin"
+                }
+                _ => false,
+            };
             let Some(source_nick) = message.source_nickname() else {
                 continue;
             };
@@ -629,7 +745,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if let Some(resp_target) = message.response_target() {
-                if "achin" == source_nick {
+                if from_achin_operator {
                     if msg.contains("go quit") || msg.starts_with("!quit") {
                         break;
                     }
@@ -640,6 +756,64 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(to_part) = msg.strip_prefix("!part ") {
                         sender.send_part(to_part.trim())?;
                         continue;
+                    }
+                }
+
+                if from_achin_operator && target == BOTNAME {
+                    if let Some(channel) = msg.strip_prefix("!interject ") {
+                        let channel = channel.trim();
+                        
+                        let messages: Vec<ChatMessageThing> = message_map.with_channel(channel, |c| {
+                            c.messages.iter().cloned().collect()
+                        });
+
+                        match generate_interjection(&messages).await {
+                            Ok(Some(j)) => {
+                                sender.send_privmsg(resp_target, &j)?;
+                                message_map.save_interjection(channel, Some(j));
+                            }
+                            Ok(None) => {
+                                sender.send_privmsg(resp_target, "no comment")?;
+                                message_map.save_interjection(channel, None);
+                            }
+                            Err(e) => {
+                                sender.send_privmsg(resp_target, format!("Error in interjection: {e}"))?;
+                            }
+                        }
+                    } else if let Some(channel) = msg.strip_prefix("!sendinterjection ") {
+                        let channel = channel.trim();
+                        if let Some(chan) = message_map.inner.lock().unwrap().get(channel) {
+                            if let Some(interjection) = chan.interjection.as_ref() {
+                                sender.send_privmsg(channel, interjection)?;
+                                message_map.insert_selfmsg_str(channel, interjection);
+                                message_map.save_interjection(channel, None);
+                            } else {
+                                println!("no interjection for {channel}");
+                            }
+                        } else {
+                            println!("No chanstate for {channel}");
+                        }
+                    } else if let Some(channel) = msg.strip_prefix("!imggen ") {
+                        let channel = channel.trim();
+                        let messages: Vec<ChatMessageThing> = message_map.with_channel(channel, |c| {
+                            c.messages.iter().cloned().collect()
+                        });
+                        match generate_image_prompt(&messages).await {
+                            Ok(Some(url)) => {
+                                sender.send_privmsg(resp_target, &url)?;
+                            }
+                            Ok(None) => {
+                                sender.send_privmsg(resp_target, "no image")?;
+                                message_map.save_interjection(channel, None);
+                            }
+                            Err(e) => {
+                                sender.send_privmsg(resp_target, format!("Error in imggen: {e}"))?;
+                            }
+                        }
+                    } else if let Some(_) = msg.strip_prefix("!save") {
+                        message_map.save_all()?;
+                    } else if let Some(channel) = msg.strip_prefix("!load") {
+                        message_map.load(channel.trim(), true)?;
                     }
                 }
 
@@ -791,10 +965,34 @@ async fn main() -> anyhow::Result<()> {
                 if OPT_IN_ALL_CAPTURE.contains(&source_nick) {
                     message_map.insert_usermsg(target, source_nick, msg).await;
                 }
+
+                if message_map.can_interject(target) {
+                    let messages: Vec<ChatMessageThing> = message_map.with_channel(target, |c| {
+                        c.messages.iter().cloned().collect()
+                    });
+                    match generate_interjection(&messages).await {
+                        Ok(j) => {
+                            if let Some(j) = j {
+                                sender.send_privmsg("achin", &j)?;
+                                message_map.save_interjection(
+                                    target,
+                                    Some(j.trim_matches('"').to_string()),
+                                );
+                            } else {
+                                sender.send_privmsg("achin", "no comment")?;
+                                message_map.save_interjection(target, None);
+                            }
+                        }
+                        Err(e) => {
+                            sender.send_privmsg("achin", format!("Error: {e}"))?;
+                        }
+                    }
+                }
             }
         }
     }
 
+    message_map.save_all()?;
     client.send_quit("Bye")?;
 
     Ok(())
@@ -921,16 +1119,19 @@ async fn test_image_detection() {
 
 #[tokio::test]
 async fn test_load_from_disk() -> anyhow::Result<()> {
-    let f = File::open("#overviewer.json")?;
+    use anna::get_prompt;
+    let f = File::open("##em32.json")?;
 
     let mut all_msg = String::new();
     let messages: Vec<ChatMessageThing> = serde_json::from_reader(f)?;
+    dbg!(&messages);
+    return Ok(());
     for msg in messages.iter().filter_map(|msg| msg.get_as_irc_format()) {
         all_msg.push_str(msg);
         all_msg.push('\n');
     }
 
-    let instruction = get_prompt("interject")?;
+    let instruction = get_prompt("image")?;
 
     let completion_messages = vec![
         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
@@ -954,8 +1155,14 @@ async fn test_load_from_disk() -> anyhow::Result<()> {
         }),
     ];
 
-    let resp = openai::get_chat(completion_messages, Some("gpt-4-0125-preview"), Some(0.8)).await?;
+    let resp = openai::get_chat(completion_messages, Some("gpt-4o"), Some(0.8)).await?;
     dbg!(resp);
 
     Ok(())
+}
+
+#[test]
+fn test_load_state() {
+    let state = ChannelState::load("#overviewer.json").unwrap();
+    dbg!(state);
 }

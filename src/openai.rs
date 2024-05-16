@@ -95,7 +95,7 @@ pub async fn get_chat(
         .chat()
         .create(CreateChatCompletionRequest {
             messages: m,
-            model: model.unwrap_or("gpt-4-vision-preview").to_string(),
+            model: model.unwrap_or("gpt-4o").to_string(),
             max_tokens: Some(4096),
             temperature: temp,
             ..Default::default()
