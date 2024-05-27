@@ -26,6 +26,7 @@ use async_openai::types::{
 use chrono::{DateTime, Utc};
 use futures::prelude::*;
 use irc::client::prelude::*;
+use numbat::{markup::Markup, module_importer::BuiltinModuleImporter, InterpreterSettings};
 use serde::{Deserialize, Serialize};
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
@@ -171,7 +172,7 @@ fn reponse_msg_to_request_msg(msg: ChatCompletionResponseMessage) -> ChatComplet
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ChannelState {
     /// List of messages in the channel
     messages: VecDeque<ChatMessageThing>,
@@ -180,6 +181,41 @@ pub struct ChannelState {
     last_interjection_attempt: DateTime<Utc>,
     /// A possible interjection for this channel
     interjection: Option<String>,
+
+    /// A numbat context
+    ///
+    /// It's wrapped in a mutex so we can make it unwindsafe
+    #[serde(skip, default = "make_new_numbat_context")]
+    numbat_context: Arc<Mutex<numbat::Context>>,
+}
+
+fn make_new_numbat_context() -> Arc<Mutex<numbat::Context>> {
+    let mut ctx = numbat::Context::new(BuiltinModuleImporter::default());
+    let mut settings = InterpreterSettings {
+        print_fn: Box::new(move |_: &Markup| {
+            // deliberately no printing here
+        }),
+    };
+    let _ = ctx
+        .interpret_with_settings(
+            &mut settings,
+            "use prelude",
+            numbat::resolver::CodeSource::Internal,
+        )
+        .unwrap();
+
+    Arc::new(Mutex::new(ctx))
+}
+
+impl std::fmt::Debug for ChannelState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelState")
+            .field("message", &self.messages)
+            .field("last_bot_message", &self.last_bot_message)
+            .field("last_interjection_attempt", &self.last_interjection_attempt)
+            .field("interjection", &self.interjection)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ChannelState {
@@ -189,6 +225,7 @@ impl Default for ChannelState {
             last_bot_message: Utc::now(),
             last_interjection_attempt: Utc::now(),
             interjection: Default::default(),
+            numbat_context: make_new_numbat_context(),
         }
     }
 }
@@ -206,6 +243,7 @@ impl ChannelState {
             last_bot_message: self.last_bot_message,
             last_interjection_attempt: self.last_interjection_attempt,
             interjection: self.interjection,
+            numbat_context: make_new_numbat_context(),
         }
     }
     fn trim_message_for_age_and_contextsize(&mut self) {
@@ -958,7 +996,37 @@ async fn main() -> anyhow::Result<()> {
                         resp_target,
                         format!("Clearing list of saved context for {resp_target}"),
                     )?;
-                }
+                } else if let Some(expr) = msg.strip_prefix("!nb ") {
+                    let result = message_map.with_channel(resp_target, |chan| {
+                        let ctx_clone = chan.numbat_context.clone();
+                        std::panic::catch_unwind(move || {
+                            if let Ok(mut ctx) = ctx_clone.lock() {
+                                Ok(get_numbat_result(expr.trim(), &mut ctx)?)
+                            } else {
+                                anyhow::bail!("Failed to get context mutex lock")
+                            }
+                        })
+                    });
+                    match result {
+                        Ok(Ok(result)) => {
+                            let _ = sender.send_privmsg(resp_target, &result);
+                        }
+                        Ok(Err(e)) => {
+                            let _ = sender.send_privmsg(resp_target, format!("Error: {e}"));
+                        }
+                        Err(p) => {
+                            let _ = sender.send_privmsg(resp_target, format!("Panic: {p:?}"));
+                            // construct a new context because the old one is probably in a bad state
+                            message_map.with_channel(resp_target, |chan| {
+                                chan.numbat_context = make_new_numbat_context();
+                            });
+                        }
+                    }
+                } else if msg.starts_with("!nbclear") {
+                    message_map.with_channel(resp_target, |chan| {
+                        chan.numbat_context = make_new_numbat_context();
+                    });
+                    sender.send_privmsg(resp_target, "Cleared Numbat context")?;
             }
             if target.starts_with('#') {
                 // only certain users are comfortable with all their messages being used
@@ -1165,4 +1233,37 @@ async fn test_load_from_disk() -> anyhow::Result<()> {
 fn test_load_state() {
     let state = ChannelState::load("#overviewer.json").unwrap();
     dbg!(state);
+}
+
+#[test]
+fn test_numbat() {
+    // let mut code_and_source = Vec::new();
+    let to_be_printed: Arc<Mutex<Vec<Markup>>> = Arc::new(Mutex::new(vec![]));
+    let to_be_printed_c = to_be_printed.clone();
+    let ctx = make_new_numbat_context();
+    let mut ctx = ctx.lock().unwrap();
+
+    let registry = ctx.dimension_registry().clone();
+    let mut settings = InterpreterSettings {
+        print_fn: Box::new(move |s: &Markup| {
+            to_be_printed_c.lock().unwrap().push(s.clone());
+        }),
+    };
+    let (statements, result) = ctx
+        .interpret_with_settings(
+            &mut settings,
+            "6 miles per 2 gallons -> mpg",
+            numbat::resolver::CodeSource::Text,
+        )
+        .unwrap();
+
+    for statement in &statements {
+        println!(
+            "{}",
+            numbat::pretty_print::PrettyPrint::pretty_print(statement)
+        );
+    }
+
+    let r = result.to_markup(statements.last(), &registry, true, true);
+    println!("{r}");
 }

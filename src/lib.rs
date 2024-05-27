@@ -7,6 +7,7 @@ use async_openai::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, Role,
 };
 use chrono::{DateTime, Utc};
+use numbat::markup::Formatter;
 use serde::{Deserialize, Serialize};
 
 // pub mod plugins;
@@ -232,4 +233,58 @@ pub async fn generate_image_prompt(channel_messages: &[ChatMessageThing]) -> any
         }
     }
     Ok(None)
+}
+
+struct IRCFormatter;
+
+impl numbat::markup::Formatter for IRCFormatter {
+    fn format_part(
+        &self,
+        numbat::markup::FormattedString(_output_type, format_type, text):  &numbat::markup::FormattedString,
+    ) -> String {
+        match format_type {
+            numbat::markup::FormatType::Whitespace => format!("{text}"),
+            numbat::markup::FormatType::Emphasized => format!("\x02{text}\x0f"),
+            numbat::markup::FormatType::Dimmed => format!("{text}"),
+            numbat::markup::FormatType::Text => format!("{text}"),
+            numbat::markup::FormatType::String => format!("\x0303{text}\x0f"),
+            numbat::markup::FormatType::Keyword => format!("\x0313{text}\x0f"),
+            numbat::markup::FormatType::Value => format!("\x0308{text}\x0f"),
+            numbat::markup::FormatType::Unit => format!("\x0311{text}\x0f"),
+            numbat::markup::FormatType::Identifier => format!("{text}"),
+            numbat::markup::FormatType::TypeIdentifier => format!("\x0312\x1d{text}\x0f"),
+            numbat::markup::FormatType::Operator => format!("\x02{text}\x0f"),
+            numbat::markup::FormatType::Decorator => format!("\x0303{text}\x0f"),
+        }
+    }
+}
+
+pub fn get_numbat_result(input: &str, ctx: &mut numbat::Context) -> anyhow::Result<String> {
+    let to_be_printed: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(vec![]));
+    let to_be_printed_c = to_be_printed.clone();
+    let registry = ctx.dimension_registry().clone();
+    let mut settings = numbat::InterpreterSettings {
+        print_fn: Box::new(move |s: &numbat::markup::Markup| {
+            to_be_printed_c.lock().unwrap().push(s.clone());
+        }),
+    };
+    let (statements, result) =
+        ctx.interpret_with_settings(&mut settings, input, numbat::resolver::CodeSource::Text)?;
+
+    let mut s = String::new();
+    for statement in &statements {
+        let markup = numbat::pretty_print::PrettyPrint::pretty_print(statement);
+        s.push_str(&IRCFormatter.format(&markup, false));
+
+        // s.push_str(&format!(
+        //     "{}",
+
+        // ))
+    }
+
+    let r = result.to_markup(statements.last(), &registry, true, true);
+    s.push_str(&IRCFormatter.format(&r, false));
+    // s.push_str(r.to_string().as_str());
+
+    Ok(s)
 }
