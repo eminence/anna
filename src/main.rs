@@ -10,7 +10,9 @@ use std::{
 };
 
 use anna::{
-    generate_image_prompt, generate_interjection, openai::{self, get_tts}, upload_content, ChatMessageThing
+    generate_image_prompt, generate_interjection, get_numbat_result,
+    openai::{self, get_tts},
+    upload_content, ChatMessageThing,
 };
 use anyhow::{bail, Context};
 use async_openai::types::{
@@ -395,7 +397,11 @@ impl MessageMap {
                 .iter()
                 .filter(|cmt| now - cmt.date < chrono::Duration::minutes(30))
                 .count();
-            dbg!(num_messages_past_hour, (now - chan.last_bot_message).num_hours(), (now - chan.last_interjection_attempt).num_minutes());
+            dbg!(
+                num_messages_past_hour,
+                (now - chan.last_bot_message).num_hours(),
+                (now - chan.last_interjection_attempt).num_minutes()
+            );
 
             now - chan.last_bot_message > chrono::Duration::hours(36)
                 && now - chan.last_interjection_attempt > chrono::Duration::minutes(30)
@@ -437,7 +443,6 @@ impl MessageMap {
     }
     pub fn insert_selfmsg_str(&self, channel: &str, message: &str) {
         self.with_channel(channel, |chan| {
-            
             chan.last_bot_message = Utc::now();
             #[allow(deprecated)]
             chan.messages.push_back(ChatMessageThing {
@@ -800,10 +805,9 @@ async fn main() -> anyhow::Result<()> {
                 if from_achin_operator && target == BOTNAME {
                     if let Some(channel) = msg.strip_prefix("!interject ") {
                         let channel = channel.trim();
-                        
-                        let messages: Vec<ChatMessageThing> = message_map.with_channel(channel, |c| {
-                            c.messages.iter().cloned().collect()
-                        });
+
+                        let messages: Vec<ChatMessageThing> = message_map
+                            .with_channel(channel, |c| c.messages.iter().cloned().collect());
 
                         match generate_interjection(&messages).await {
                             Ok(Some(j)) => {
@@ -815,37 +819,36 @@ async fn main() -> anyhow::Result<()> {
                                 message_map.save_interjection(channel, None);
                             }
                             Err(e) => {
-                                sender.send_privmsg(resp_target, format!("Error in interjection: {e}"))?;
+                                sender.send_privmsg(
+                                    resp_target,
+                                    format!("Error in interjection: {e}"),
+                                )?;
                             }
                         }
                     } else if let Some(channel) = msg.strip_prefix("!sendinterjection ") {
                         let channel = channel.trim();
-                        if let Some(chan) = message_map.inner.lock().unwrap().get(channel) {
-                            if let Some(interjection) = chan.interjection.as_ref() {
-                                sender.send_privmsg(channel, interjection)?;
-                                message_map.insert_selfmsg_str(channel, interjection);
-                                message_map.save_interjection(channel, None);
-                            } else {
-                                println!("no interjection for {channel}");
-                            }
+                        let x = message_map.with_channel(channel, |c| c.interjection.clone());
+                        if let Some(interjection) = x {
+                            sender.send_privmsg(channel, &interjection)?;
+                            message_map.insert_selfmsg_str(channel, &interjection);
+                            message_map.save_interjection(channel, None);
                         } else {
-                            println!("No chanstate for {channel}");
+                            println!("no interjection for {channel}");
                         }
                     } else if let Some(channel) = msg.strip_prefix("!imggen ") {
                         let channel = channel.trim();
-                        let messages: Vec<ChatMessageThing> = message_map.with_channel(channel, |c| {
-                            c.messages.iter().cloned().collect()
-                        });
+                        let messages: Vec<ChatMessageThing> = message_map
+                            .with_channel(channel, |c| c.messages.iter().cloned().collect());
                         match generate_image_prompt(&messages).await {
                             Ok(Some(url)) => {
                                 sender.send_privmsg(resp_target, &url)?;
                             }
                             Ok(None) => {
                                 sender.send_privmsg(resp_target, "no image")?;
-                                message_map.save_interjection(channel, None);
                             }
                             Err(e) => {
-                                sender.send_privmsg(resp_target, format!("Error in imggen: {e}"))?;
+                                sender
+                                    .send_privmsg(resp_target, format!("Error in imggen: {e}"))?;
                             }
                         }
                     } else if let Some(_) = msg.strip_prefix("!save") {
@@ -1027,6 +1030,22 @@ async fn main() -> anyhow::Result<()> {
                         chan.numbat_context = make_new_numbat_context();
                     });
                     sender.send_privmsg(resp_target, "Cleared Numbat context")?;
+                } else if let Some(channel) = msg.strip_prefix("!imggen ") {
+                    let channel = channel.trim();
+                    let messages: Vec<ChatMessageThing> =
+                        message_map.with_channel(channel, |c| c.messages.iter().cloned().collect());
+                    match generate_image_prompt(&messages).await {
+                        Ok(Some(url)) => {
+                            sender.send_privmsg(resp_target, &url)?;
+                        }
+                        Ok(None) => {
+                            sender.send_privmsg(resp_target, "no image")?;
+                        }
+                        Err(e) => {
+                            sender.send_privmsg(resp_target, format!("Error in imggen: {e}"))?;
+                        }
+                    }
+                }
             }
             if target.starts_with('#') {
                 // only certain users are comfortable with all their messages being used
@@ -1035,9 +1054,8 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if message_map.can_interject(target) {
-                    let messages: Vec<ChatMessageThing> = message_map.with_channel(target, |c| {
-                        c.messages.iter().cloned().collect()
-                    });
+                    let messages: Vec<ChatMessageThing> =
+                        message_map.with_channel(target, |c| c.messages.iter().cloned().collect());
                     match generate_interjection(&messages).await {
                         Ok(j) => {
                             if let Some(j) = j {

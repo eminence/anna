@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs::File};
+use std::{
+    collections::HashMap,
+    fs::File,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
 use async_openai::types::{
@@ -32,7 +36,11 @@ impl ChatMessageThing {
     }
     pub fn reconstitute(self) -> Self {
         let msg = match self.msg {
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage { content, role, name }) => {
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content,
+                role,
+                name,
+            }) => {
                 if role == Role::User {
                     ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
                         content: ChatCompletionRequestUserMessageContent::Text(content),
@@ -40,12 +48,19 @@ impl ChatMessageThing {
                         name,
                     })
                 } else {
-                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage { content, role, name })
+                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                        content,
+                        role,
+                        name,
+                    })
                 }
-            },
-            other => other
+            }
+            other => other,
         };
-        ChatMessageThing { date: self.date, msg}
+        ChatMessageThing {
+            date: self.date,
+            msg,
+        }
     }
     pub fn get_for_api(&self, now: DateTime<Utc>) -> ChatCompletionRequestMessage {
         if now - self.date < chrono::Duration::hours(1) {
@@ -142,10 +157,14 @@ pub fn get_prompt(key: &str) -> anyhow::Result<String> {
     Ok(prompts.remove(key).context("Prompt not found")?)
 }
 
-pub async fn generate_interjection(channel_messages: &[ChatMessageThing]) -> anyhow::Result<Option<String>> {
-
+pub async fn generate_interjection(
+    channel_messages: &[ChatMessageThing],
+) -> anyhow::Result<Option<String>> {
     let mut all_msg = String::new();
-    for msg in channel_messages.iter().filter_map(|msg| msg.get_as_irc_format()) {
+    for msg in channel_messages
+        .iter()
+        .filter_map(|msg| msg.get_as_irc_format())
+    {
         all_msg.push_str(msg);
         all_msg.push('\n');
     }
@@ -189,10 +208,14 @@ pub async fn generate_interjection(channel_messages: &[ChatMessageThing]) -> any
     Ok(None)
 }
 
-pub async fn generate_image_prompt(channel_messages: &[ChatMessageThing]) -> anyhow::Result<Option<String>> {
-
+pub async fn generate_image_prompt(
+    channel_messages: &[ChatMessageThing],
+) -> anyhow::Result<Option<String>> {
     let mut all_msg = String::new();
-    for msg in channel_messages.iter().filter_map(|msg| msg.get_as_irc_format()) {
+    for msg in channel_messages
+        .iter()
+        .filter_map(|msg| msg.get_as_irc_format())
+    {
         all_msg.push_str(msg);
         all_msg.push('\n');
     }
@@ -229,7 +252,7 @@ pub async fn generate_image_prompt(channel_messages: &[ChatMessageThing]) -> any
             if m.contains("no image") {
                 return Ok(None);
             }
-            return Ok(Some(openai::get_image(m.trim_matches('"')).await?))
+            return Ok(Some(openai::get_image(m.trim_matches('"')).await?));
         }
     }
     Ok(None)
