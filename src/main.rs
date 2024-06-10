@@ -38,6 +38,7 @@ const OPT_IN_ALL_CAPTURE: &[&str] = &[
     "agrif",
     "CounterPillow",
     "GizmoBot",
+    "ion",
 ];
 const BOTNAME: &str = "Charbot9000";
 const BOTNAME_PREFIX1: &str = "Charbot9000:";
