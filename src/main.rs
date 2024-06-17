@@ -10,9 +10,9 @@ use std::{
 };
 
 use anna::{
-    generate_image_prompt, generate_interjection, get_numbat_result,
+    generate_image_prompt, generate_interjection,
     openai::{self, get_tts},
-    upload_content, ChatMessageThing,
+    upload_content, ChatMessageThing, NumbatComponent,
 };
 use anyhow::{bail, Context};
 use async_openai::types::{
@@ -28,7 +28,7 @@ use async_openai::types::{
 use chrono::{DateTime, Utc};
 use futures::prelude::*;
 use irc::client::prelude::*;
-use numbat::{markup::Markup, module_importer::BuiltinModuleImporter, InterpreterSettings};
+// use numbat::{markup::Markup, module_importer::BuiltinModuleImporter, InterpreterSettings};
 use serde::{Deserialize, Serialize};
 
 const OPT_IN_ALL_CAPTURE: &[&str] = &[
@@ -189,25 +189,15 @@ pub struct ChannelState {
     ///
     /// It's wrapped in a mutex so we can make it unwindsafe
     #[serde(skip, default = "make_new_numbat_context")]
-    numbat_context: Arc<Mutex<numbat::Context>>,
+    numbat_context: Arc<Mutex<Option<NumbatComponent>>>,
 }
 
-fn make_new_numbat_context() -> Arc<Mutex<numbat::Context>> {
-    let mut ctx = numbat::Context::new(BuiltinModuleImporter::default());
-    let mut settings = InterpreterSettings {
-        print_fn: Box::new(move |_: &Markup| {
-            // deliberately no printing here
-        }),
-    };
-    let _ = ctx
-        .interpret_with_settings(
-            &mut settings,
-            "use prelude",
-            numbat::resolver::CodeSource::Internal,
-        )
-        .unwrap();
-
-    Arc::new(Mutex::new(ctx))
+fn make_new_numbat_context() -> Arc<Mutex<Option<NumbatComponent>>> {
+    Arc::new(Mutex::new(
+        NumbatComponent::new("numbat_component.wasm")
+            .map_err(|e| println!("Failed to create NumbatComponent: {e}"))
+            .ok(),
+    ))
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -1005,7 +995,11 @@ async fn main() -> anyhow::Result<()> {
                         let ctx_clone = chan.numbat_context.clone();
                         std::panic::catch_unwind(move || {
                             if let Ok(mut ctx) = ctx_clone.lock() {
-                                Ok(get_numbat_result(expr.trim(), &mut ctx)?)
+                                if let Some(ctx) = ctx.as_mut() {
+                                    Ok(ctx.eval(expr.trim())?)
+                                } else {
+                                    Ok("No Numbat context".to_string())
+                                }
                             } else {
                                 anyhow::bail!("Failed to get context mutex lock")
                             }
@@ -1031,6 +1025,11 @@ async fn main() -> anyhow::Result<()> {
                         chan.numbat_context = make_new_numbat_context();
                     });
                     sender.send_privmsg(resp_target, "Cleared Numbat context")?;
+                } else if msg.starts_with("!nbreload") {
+                    message_map.with_channel(resp_target, |chan| {
+                        chan.numbat_context = make_new_numbat_context();
+                    });
+                    sender.send_privmsg(resp_target, "Reloaded numbat wasm")?;
                 } else if let Some(channel) = msg.strip_prefix("!imggen ") {
                     let channel = channel.trim();
                     let messages: Vec<ChatMessageThing> =
@@ -1257,32 +1256,32 @@ fn test_load_state() {
 #[test]
 fn test_numbat() {
     // let mut code_and_source = Vec::new();
-    let to_be_printed: Arc<Mutex<Vec<Markup>>> = Arc::new(Mutex::new(vec![]));
-    let to_be_printed_c = to_be_printed.clone();
-    let ctx = make_new_numbat_context();
-    let mut ctx = ctx.lock().unwrap();
+    // let to_be_printed: Arc<Mutex<Vec<Markup>>> = Arc::new(Mutex::new(vec![]));
+    // let to_be_printed_c = to_be_printed.clone();
+    // let ctx = make_new_numbat_context();
+    // let mut ctx = ctx.lock().unwrap();
 
-    let registry = ctx.dimension_registry().clone();
-    let mut settings = InterpreterSettings {
-        print_fn: Box::new(move |s: &Markup| {
-            to_be_printed_c.lock().unwrap().push(s.clone());
-        }),
-    };
-    let (statements, result) = ctx
-        .interpret_with_settings(
-            &mut settings,
-            "6 miles per 2 gallons -> mpg",
-            numbat::resolver::CodeSource::Text,
-        )
-        .unwrap();
+    // let registry = ctx.dimension_registry().clone();
+    // let mut settings = InterpreterSettings {
+    //     print_fn: Box::new(move |s: &Markup| {
+    //         to_be_printed_c.lock().unwrap().push(s.clone());
+    //     }),
+    // };
+    // let (statements, result) = ctx
+    //     .interpret_with_settings(
+    //         &mut settings,
+    //         "6 miles per 2 gallons -> mpg",
+    //         numbat::resolver::CodeSource::Text,
+    //     )
+    //     .unwrap();
 
-    for statement in &statements {
-        println!(
-            "{}",
-            numbat::pretty_print::PrettyPrint::pretty_print(statement)
-        );
-    }
+    // for statement in &statements {
+    //     println!(
+    //         "{}",
+    //         numbat::pretty_print::PrettyPrint::pretty_print(statement)
+    //     );
+    // }
 
-    let r = result.to_markup(statements.last(), &registry, true, true);
-    println!("{r}");
+    // let r = result.to_markup(statements.last(), &registry, true, true);
+    // println!("{r}");
 }

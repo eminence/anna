@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -11,8 +12,12 @@ use async_openai::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, Role,
 };
 use chrono::{DateTime, Utc};
-use numbat::markup::Formatter;
+// use numbat::markup::Formatter;
 use serde::{Deserialize, Serialize};
+use wasmtime::{
+    component::ResourceAny,
+    Store,
+};
 
 // pub mod plugins;
 
@@ -258,56 +263,154 @@ pub async fn generate_image_prompt(
     Ok(None)
 }
 
-struct IRCFormatter;
+// struct IRCFormatter;
 
-impl numbat::markup::Formatter for IRCFormatter {
-    fn format_part(
-        &self,
-        numbat::markup::FormattedString(_output_type, format_type, text):  &numbat::markup::FormattedString,
-    ) -> String {
-        match format_type {
-            numbat::markup::FormatType::Whitespace => format!("{text}"),
-            numbat::markup::FormatType::Emphasized => format!("\x02{text}\x0f"),
-            numbat::markup::FormatType::Dimmed => format!("{text}"),
-            numbat::markup::FormatType::Text => format!("{text}"),
-            numbat::markup::FormatType::String => format!("\x0303{text}\x0f"),
-            numbat::markup::FormatType::Keyword => format!("\x0313{text}\x0f"),
-            numbat::markup::FormatType::Value => format!("\x0308{text}\x0f"),
-            numbat::markup::FormatType::Unit => format!("\x0311{text}\x0f"),
-            numbat::markup::FormatType::Identifier => format!("{text}"),
-            numbat::markup::FormatType::TypeIdentifier => format!("\x0312\x1d{text}\x0f"),
-            numbat::markup::FormatType::Operator => format!("\x02{text}\x0f"),
-            numbat::markup::FormatType::Decorator => format!("\x0303{text}\x0f"),
-        }
+// impl numbat::markup::Formatter for IRCFormatter {
+//     fn format_part(
+//         &self,
+//         numbat::markup::FormattedString(_output_type, format_type, text):  &numbat::markup::FormattedString,
+//     ) -> String {
+//         match format_type {
+//             numbat::markup::FormatType::Whitespace => format!("{text}"),
+//             numbat::markup::FormatType::Emphasized => format!("\x02{text}\x0f"),
+//             numbat::markup::FormatType::Dimmed => format!("{text}"),
+//             numbat::markup::FormatType::Text => format!("{text}"),
+//             numbat::markup::FormatType::String => format!("\x0303{text}\x0f"),
+//             numbat::markup::FormatType::Keyword => format!("\x0313{text}\x0f"),
+//             numbat::markup::FormatType::Value => format!("\x0308{text}\x0f"),
+//             numbat::markup::FormatType::Unit => format!("\x0311{text}\x0f"),
+//             numbat::markup::FormatType::Identifier => format!("{text}"),
+//             numbat::markup::FormatType::TypeIdentifier => format!("\x0312\x1d{text}\x0f"),
+//             numbat::markup::FormatType::Operator => format!("\x02{text}\x0f"),
+//             numbat::markup::FormatType::Decorator => format!("\x0303{text}\x0f"),
+//         }
+//     }
+// }
+
+// pub fn get_numbat_result(input: &str, ctx: &mut numbat::Context) -> anyhow::Result<String> {
+//     let to_be_printed: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(vec![]));
+//     let to_be_printed_c = to_be_printed.clone();
+//     let registry = ctx.dimension_registry().clone();
+//     let mut settings = numbat::InterpreterSettings {
+//         print_fn: Box::new(move |s: &numbat::markup::Markup| {
+//             to_be_printed_c.lock().unwrap().push(s.clone());
+//         }),
+//     };
+//     let (statements, result) =
+//         ctx.interpret_with_settings(&mut settings, input, numbat::resolver::CodeSource::Text)?;
+
+//     let mut s = String::new();
+//     for statement in &statements {
+//         let markup = numbat::pretty_print::PrettyPrint::pretty_print(statement);
+//         s.push_str(&IRCFormatter.format(&markup, false));
+
+//         // s.push_str(&format!(
+//         //     "{}",
+
+//         // ))
+//     }
+
+//     let r = result.to_markup(statements.last(), &registry, true, true);
+//     s.push_str(&IRCFormatter.format(&r, false));
+//     // s.push_str(r.to_string().as_str());
+
+//     Ok(s)
+// }
+
+wasmtime::component::bindgen!({
+    path: "world.wit",
+    world: "example",
+    async: false
+});
+
+struct MyState {
+    ctx: wasmtime_wasi::WasiCtx,
+    table: wasmtime_wasi::ResourceTable,
+}
+
+impl wasmtime_wasi::WasiView for MyState {
+    fn table(&mut self) -> &mut wasmtime_wasi::ResourceTable {
+        &mut self.table
+    }
+
+    fn ctx(&mut self) -> &mut wasmtime_wasi::WasiCtx {
+        &mut self.ctx
     }
 }
 
-pub fn get_numbat_result(input: &str, ctx: &mut numbat::Context) -> anyhow::Result<String> {
-    let to_be_printed: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(vec![]));
-    let to_be_printed_c = to_be_printed.clone();
-    let registry = ctx.dimension_registry().clone();
-    let mut settings = numbat::InterpreterSettings {
-        print_fn: Box::new(move |s: &numbat::markup::Markup| {
-            to_be_printed_c.lock().unwrap().push(s.clone());
-        }),
-    };
-    let (statements, result) =
-        ctx.interpret_with_settings(&mut settings, input, numbat::resolver::CodeSource::Text)?;
+impl MyState {
+    fn new() -> Self {
+        let table = wasmtime_wasi::ResourceTable::new();
+        let ctx = wasmtime_wasi::WasiCtxBuilder::new()
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .build();
+        Self { ctx, table }
+    }
+}
 
-    let mut s = String::new();
-    for statement in &statements {
-        let markup = numbat::pretty_print::PrettyPrint::pretty_print(statement);
-        s.push_str(&IRCFormatter.format(&markup, false));
+pub struct NumbatComponent {
+    store: Store<MyState>,
+    inst: Example,
+    inner_ctx: ResourceAny,
+}
 
-        // s.push_str(&format!(
-        //     "{}",
+impl NumbatComponent {
+    pub fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let mut config = wasmtime::Config::default();
+        config.wasm_component_model(true);
+        // config.async_support(true);
 
-        // ))
+        let engine = wasmtime::Engine::new(&config)?;
+        let mut linker = wasmtime::component::Linker::new(&engine);
+
+        let wasi_view = MyState::new();
+
+        let mut store = wasmtime::Store::new(&engine, wasi_view);
+
+        let component = wasmtime::component::Component::from_file(&engine, path)?;
+
+        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+
+        let (inst, _) = Example::instantiate(&mut store, &component, &linker)?;
+
+        let x = inst.component_numbat_component_numbat();
+        let y = x.ctx().call_constructor(&mut store)?;
+
+        Ok(Self {
+            store,
+            inst,
+            inner_ctx: y,
+        })
     }
 
-    let r = result.to_markup(statements.last(), &registry, true, true);
-    s.push_str(&IRCFormatter.format(&r, false));
-    // s.push_str(r.to_string().as_str());
+    pub fn eval(&mut self, input: &str) -> anyhow::Result<String> {
+        let guest = self.inst.component_numbat_component_numbat();
 
-    Ok(s)
+        let output = guest
+            .ctx()
+            .call_eval(&mut self.store, self.inner_ctx, input)?
+            .map_err(|s| anyhow::anyhow!(s))?;
+
+        Ok(output)
+    }
+}
+
+#[test]
+fn test_wasmtime() -> anyhow::Result<()> {
+    let mut comp = NumbatComponent::new("numbat_component.wasm")?;
+    let x = comp.eval("let x = 1")?;
+    dbg!(x);
+    let y = comp.eval("x * 2")?;
+    dbg!(y);
+
+    let z = comp.eval("panic");
+    dbg!(z);
+
+    // let mut comp = NumbatComponent::new("numbat_component.wasm")?;
+    // let y = comp.eval("x * 2")?;
+    // dbg!(y);
+
+    Ok(())
 }
